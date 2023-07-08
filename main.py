@@ -11,7 +11,7 @@ app = typer.Typer()
 def list_books(filename: str):
     books = get_books_from_csv(filename)
     for book in books:
-        typer.echo(book.name, book.estimated)
+        typer.echo(f"{book.name} - {book.estimated}h")
 
 
 @app.command()
@@ -37,8 +37,10 @@ def process_books_csv(filename: str):
         if title in books_in_notion:
             typer.echo(f"{title} already in Notion!")
             continue
-        typer.echo(f"Adding {title}")
-        notion.create_object(new_db_id, book)
+        confirm = typer.confirm(f"Do you want to add {title} to Icebox?")
+        if confirm:
+            typer.echo(f"Adding {title}")
+            notion.create_object(new_db_id, book)
 
 
 if __name__ == "__main__":

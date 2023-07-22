@@ -1,3 +1,4 @@
+from datetime import date
 import enum
 from typing import Optional
 from pydantic import BaseModel
@@ -10,11 +11,12 @@ class MediaType(str, enum.Enum):
     SERIES = "Series"
     GAME = "Game"
     GAME_VR = "Game (VR)"
+    GAME_MOBILE = "Game (mobile)"
     BOOK = "Book"
     BOOK_ED = "Book (educational)"
     BOOK_COM = "Book (comics)"
     ART = "Article"
-    VID = "Video"
+    VID = "Talk/video"
 
 
 class Status(str, enum.Enum):
@@ -31,3 +33,4 @@ class Entry(BaseModel):
     spent: Optional[float] = None
     prog: str = ""
     status: Optional[Status] = None
+    release_date: Optional[date] = None

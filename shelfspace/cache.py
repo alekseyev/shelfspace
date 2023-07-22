@@ -1,5 +1,4 @@
 from contextlib import ContextDecorator
-from functools import wraps
 import json
 
 
@@ -12,13 +11,13 @@ class Cache:
 
     def __getitem__(self, key):
         return self._kv[key]
-    
+
     def __setitem__(self, key, value):
         self._kv[key] = value
 
     def __contains__(self, value):
         return value in self._kv
-    
+
     def load(self):
         try:
             with open(self.filename, "r") as f:

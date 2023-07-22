@@ -105,6 +105,11 @@ class NotionAPI(BaseAPI):
                     "Sp.": {
                         "number": entry.spent,
                     },
+                    "Release": {
+                        "date": {"start": str(entry.release_date)},
+                    }
+                    if entry.release_date
+                    else None,
                 },
             },
         )

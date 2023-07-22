@@ -17,9 +17,7 @@ class BaseAPI:
         if cached and not self._reload:
             if param_key in cache:
                 return cache[param_key]
-        response = requests.get(
-            full_url, headers=self._headers(), params=params
-        )
+        response = requests.get(full_url, headers=self._headers(), params=params)
         result = response.json()
         if cached:
             cache[param_key] = result
@@ -31,12 +29,9 @@ class BaseAPI:
         if cached and not self._reload:
             if param_key in cache:
                 return cache[param_key]
-        response = requests.post(
-            full_url, headers=self._headers(), json=params
-        )
+        response = requests.post(full_url, headers=self._headers(), json=params)
         result = response.json()
         if cached:
-            print(param_key)
             cache[param_key] = result
         return result
 
@@ -46,7 +41,7 @@ class BaseAPI:
     def reload(self):
         self._reload = True
         return self
-    
+
     def cached(self):
         self._reload = False
         return self

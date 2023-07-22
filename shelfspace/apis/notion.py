@@ -1,10 +1,10 @@
-import requests
 import os
 
+from shelfspace.apis.base import BaseAPI
 from shelfspace.models import Entry, MediaType, Status
 
 
-class NotionAPI:
+class NotionAPI(BaseAPI):
     base_url = "https://api.notion.com/v1"
     secret = os.environ.get("NOTION_API_KEY")
     target_page = os.environ.get("NOTION_PAGE_ID")
@@ -16,18 +16,6 @@ class NotionAPI:
             "Notion-Version": "2022-06-28",
         }
 
-    def _get(self, url, params={}):
-        response = requests.get(
-            self.base_url + url, headers=self._headers(), params=params
-        )
-        return response.json()
-
-    def _post(self, url, params={}):
-        response = requests.post(
-            self.base_url + url, headers=self._headers(), json=params
-        )
-        return response.json()
-
     def _paginated_post(self, url, params=None):
         if params is None:
             params = {}
@@ -35,7 +23,7 @@ class NotionAPI:
         results = []
         has_more = True
         while has_more:
-            result = self._post(url, params)
+            result = self._post(url, params, cached=True)
             results += result["results"]
             has_more = result["has_more"]
             params["start_cursor"] = result.get("next_cursor")

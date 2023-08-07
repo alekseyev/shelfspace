@@ -3,7 +3,8 @@ import os
 from fake_useragent import UserAgent
 
 from shelfspace.apis.base import BaseAPI
-from shelfspace.esimations import estimate_from_hltb
+from shelfspace.cache import cache
+from shelfspace.estimations import estimate_from_hltb
 from shelfspace.models import Entry, MediaType, Status
 
 
@@ -38,7 +39,6 @@ class HowlongAPI(BaseAPI):
                 "limit": 1000,
                 "currentUserHome": False,
             },
-            cached=True,
         )
 
         results = []
@@ -54,10 +54,7 @@ class HowlongAPI(BaseAPI):
             elif game["platform"] == "Mobile":
                 game_type = MediaType.GAME_MOBILE
             game_data = self.get_game_data(game["game_id"])
-            try:
-                release_date = datetime.date.fromisoformat(game_data["release_date"])
-            except ValueError:
-                release_date = None
+            release_date = game_data["release_date"]
             results.append(
                 Entry(
                     type=game_type,
@@ -73,14 +70,21 @@ class HowlongAPI(BaseAPI):
         return results
 
     def get_game_data(self, game_id) -> dict:
+        cache_key = f"hltb:{game_id}"
+        if cache_key in cache:
+            return cache[cache_key]
+
         game_data = self._get(f"/_next/data/PulRqjuI9R3KSc-k9tS7i/game/{game_id}.json")
         game_data = game_data["pageProps"]["game"]["data"]["game"][0]
         estimation = None
         if val := game_data.get("comp_plus_avg"):
             estimation = estimate_from_hltb(val)
 
-        return {
+        data = {
             "platforms": game_data["profile_platform"].split(", "),
             "release_date": game_data["release_world"],
             "estimation": estimation,
         }
+        cache[cache_key] = data
+
+        return data

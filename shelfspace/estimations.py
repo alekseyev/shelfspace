@@ -22,3 +22,10 @@ def estimate_comic_book_from_pages(pages: int) -> float:
 
 def estimate_from_hltb(seconds: int) -> float:
     return estimation_from_minutes(seconds * 1.1 // 60)
+
+
+def estimate_episode(val: int) -> int:
+    val = int(val)
+    val += 5
+    val += 6 - (val % 6)
+    return val

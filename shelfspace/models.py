@@ -33,4 +33,6 @@ class Entry(BaseModel):
     spent: Optional[float] = None
     prog: str = ""
     status: Optional[Status] = None
-    release_date: Optional[date] = None
+    release_date: Optional[str] = ""
+    rating: Optional[int] = None
+    metadata: Optional[dict] = {}

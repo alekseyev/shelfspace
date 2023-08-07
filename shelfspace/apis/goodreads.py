@@ -2,7 +2,7 @@ import csv
 import re
 
 from shelfspace.models import Entry, MediaType, Status
-from shelfspace.esimations import (
+from shelfspace.estimations import (
     estimate_book_from_pages,
     estimate_comic_book_from_pages,
     estimate_ed_book_from_pages,

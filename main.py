@@ -4,6 +4,7 @@ import typer
 from shelfspace.apis.goodreads import get_books_from_csv
 from shelfspace.apis.hltb import HowlongAPI
 from shelfspace.apis.notion import NotionAPI
+from shelfspace.apis.trakt import TraktAPI
 from shelfspace.cache import cached
 from shelfspace.models import Status
 
@@ -21,7 +22,9 @@ def add_new_entries_to_notion(entries: dict[str, Entry], auto: bool = False):
     typer.echo("Initializing Notion API...")
     notion = NotionAPI()
     notion.get_databases()
+    obj_count = notion.load_objects()
     new_db_id = notion.databases["Icebox"]
+    typer.echo(f"Loaded {len(notion.databases)} databases with {obj_count} entries")
 
     entry_types = {entry.type for entry in entries.values()}
     entries_in_notion = [
@@ -38,10 +41,7 @@ def add_new_entries_to_notion(entries: dict[str, Entry], auto: bool = False):
         confirm = auto or typer.confirm(f"Do you want to add {title} to Icebox?")
         if confirm:
             typer.echo(f"Adding {title}")
-            notion.create_object(new_db_id, book)
-
-    typer.echo("Refreshing cache...")
-    notion.reload().get_objects_by_type([])
+            typer.echo(notion.create_object(new_db_id, book))
 
 
 @app.command()
@@ -66,6 +66,40 @@ def process_games(auto: bool = False):
     typer.echo("Fetching HLTB data...")
     api = HowlongAPI()
     entries = {entry.name: entry for entry in api.get_games_list()}
+    add_new_entries_to_notion(entries, auto=auto)
+
+
+@app.command()
+@cached()
+def list_movies():
+    api = TraktAPI()
+    for movie in api.watchlist_movies():
+        typer.echo(f"{movie.name} ({movie.type}) {movie.estimated} {movie.rating}")
+
+
+@app.command()
+@cached()
+def process_movies(auto: bool = False):
+    typer.echo("Fetching Trakt data...")
+    api = TraktAPI()
+    entries = {entry.name: entry for entry in api.watchlist_movies()}
+    add_new_entries_to_notion(entries, auto=auto)
+
+
+@app.command()
+@cached()
+def list_shows():
+    api = TraktAPI()
+    for movie in api.watchlist_series():
+        typer.echo(f"{movie.name} ({movie.type}) {movie.estimated}")
+
+
+@app.command()
+@cached()
+def process_shows(auto: bool = False):
+    typer.echo("Fetching Trakt data...")
+    api = TraktAPI()
+    entries = {entry.name: entry for entry in api.watchlist_series()}
     add_new_entries_to_notion(entries, auto=auto)
 
 

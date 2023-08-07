@@ -1,3 +1,4 @@
+import json
 import os
 
 from shelfspace.apis.base import BaseAPI
@@ -23,7 +24,7 @@ class NotionAPI(BaseAPI):
         results = []
         has_more = True
         while has_more:
-            result = self._post(url, params, cached=True)
+            result = self._post(url, params)
             results += result["results"]
             has_more = result["has_more"]
             params["start_cursor"] = result.get("next_cursor")
@@ -75,41 +76,58 @@ class NotionAPI(BaseAPI):
     def get_objects_by_type(self, types: list[MediaType]) -> list[Entry]:
         result = []
         for db_id in self.databases.values():
-            objects = self.get_objects(db_id)
+            objects = self.objects.get(db_id, [])
             for obj in objects:
                 if obj.type in types:
                     result.append(obj)
 
         return result
 
+    def load_objects(self) -> int:
+        self.objects = {}
+        total = 0
+        for db_id in self.databases.values():
+            objects = self.get_objects(db_id)
+            self.objects[db_id] = objects
+            total += len(objects)
+        return total
+
     def create_object(self, database_id: str, entry: Entry):
-        return self._post(
-            "/pages",
-            {
-                "parent": {
-                    "database_id": database_id,
-                },
-                "properties": {
-                    "Type": {
-                        "select": {
-                            "name": entry.type,
-                        }
-                    },
-                    "Name": {
-                        "title": [{"text": {"content": entry.name}}],
-                    },
-                    "Notes": {"rich_text": [{"text": {"content": entry.notes}}]},
-                    "Est.": {
-                        "number": entry.estimated,
-                    },
-                    "Sp.": {
-                        "number": entry.spent,
-                    },
-                    "Release": {
-                        "date": {"start": str(entry.release_date)},
+        post_data = {
+            "parent": {
+                "database_id": database_id,
+            },
+            "properties": {
+                "Type": {
+                    "select": {
+                        "name": entry.type.value,
                     }
-                    if entry.release_date
-                    else None,
+                },
+                "Name": {
+                    "title": [{"text": {"content": entry.name}}],
+                },
+                "Notes": {"rich_text": [{"text": {"content": entry.notes}}]},
+                "Est.": {
+                    "number": entry.estimated,
+                },
+                "Sp.": {
+                    "number": entry.spent,
+                },
+                "Release": {
+                    "rich_text": [{"text": {"content": entry.release_date or ""}}],
+                },
+                "Rating": {
+                    "number": entry.rating,
+                },
+                "Metainfo": {
+                    "rich_text": [
+                        {"text": {"content": json.dumps(entry.metadata or {})}}
+                    ],
                 },
             },
+        }
+        print(post_data)
+        return self._post(
+            "/pages",
+            post_data,
         )

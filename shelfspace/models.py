@@ -1,10 +1,10 @@
-from datetime import date
 import enum
 from typing import Optional
 from pydantic import BaseModel
 
 
 class MediaType(str, enum.Enum):
+    PROJECTS = "Projects"
     DUO = "Duolingo"
     COURSE = "Course"
     MOVIE = "Movie"

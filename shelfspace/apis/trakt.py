@@ -47,10 +47,10 @@ class TraktAPI(BaseAPI):
 
             item_id = item["movie"]["ids"]["trakt"]
             movie_data = self.get_movie_data(item_id)
-            if movie_data["release_date"] and movie_data["release_date"] > "2022":
+            if movie_data["release_date"] and movie_data["release_date"] > "2025":
                 release_date = movie_data["release_date"]
             elif item["movie"]:
-                release_date = item["movie"]["year"]
+                release_date = str(item["movie"]["year"])
             else:
                 release_date = None
 
@@ -64,7 +64,7 @@ class TraktAPI(BaseAPI):
                     spent=None,
                     status=Status.FUTURE,
                     release_date=release_date,
-                    rating=movie_data["rating"],
+                    rating=int(movie_data["rating"]),
                     metadata={
                         "trakt_id": item_id,
                         "trakt_status": movie_data["status"],

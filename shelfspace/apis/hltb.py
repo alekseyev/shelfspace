@@ -1,4 +1,3 @@
-import datetime
 import os
 from fake_useragent import UserAgent
 

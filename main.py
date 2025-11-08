@@ -1,4 +1,3 @@
-from tkinter import Entry
 import typer
 
 from shelfspace.apis.goodreads import get_books_from_csv
@@ -6,7 +5,7 @@ from shelfspace.apis.hltb import HowlongAPI
 from shelfspace.apis.notion import NotionAPI
 from shelfspace.apis.trakt import TraktAPI
 from shelfspace.cache import cached
-from shelfspace.models import Status
+from shelfspace.models import Entry, Status
 
 app = typer.Typer()
 

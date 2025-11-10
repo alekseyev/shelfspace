@@ -1,24 +1,40 @@
+import logging
 from datetime import datetime
-import os
+
+import requests
+
 from shelfspace.apis.base import BaseAPI
 from shelfspace.estimations import estimate_episode, estimation_from_minutes
 from shelfspace.models import Entry, MediaType, Status
 from shelfspace.cache import cache
 
 
+logger = logging.getLogger(__name__)
+
+
 class TraktAPI(BaseAPI):
     base_url = "https://api.trakt.tv"
-    client_id = os.environ.get("TRAKT_CLIENT_ID")
-    access_token = os.environ.get("TRAKT_ACCESS_TOKEN")
 
-    def refresh_token(self) -> dict:
+    def __init__(
+        self,
+        client_id: str,
+        access_token: str,
+        refresh_token: str | None = None,
+        client_secret: str | None = None,
+    ):
+        self.client_id = client_id
+        self.access_token = access_token
+        self.refresh_token = refresh_token
+        self.client_secret = client_secret
+
+    def _refresh_token(self) -> dict:
         # https://trakt.docs.apiary.io/#reference/authentication-oauth/get-token
         data = self._post(
             "/oauth/token",
             {
-                "refresh_token": os.environ.get("TRAKT_REFRESH_TOKEN"),
-                "client_id": os.environ.get("TRAKT_CLIENT_ID"),
-                "client_secret": os.environ.get("TRAKT_CLIENT_SECRET"),
+                "refresh_token": self.refresh_token,
+                "client_id": self.client_id,
+                "client_secret": self.client_secret,
                 "redirect_uri": "urn:ietf:wg:oauth:2.0:oob",
                 "grant_type": "refresh_token",
             },
@@ -37,6 +53,56 @@ class TraktAPI(BaseAPI):
             "trakt-api-version": "2",
             "Authorization": f"Bearer {self.access_token}",
         }
+
+    def _handle_token_refresh(self) -> None:
+        """Refresh access token and update instance with new tokens."""
+        tokens = self._refresh_token()
+        self.access_token = tokens["access_token"]
+        self.refresh_token = tokens["refresh_token"]
+        logger.info("Trakt API tokens refreshed successfully")
+
+    def _get_tokens(self) -> dict:
+        return {
+            "access_token": self.access_token,
+            "refresh_token": self.refresh_token,
+        }
+
+    def _make_request_with_retry(
+        self, method: str, url: str, **kwargs
+    ) -> dict:
+        """Make HTTP request with automatic token refresh on 401.
+
+        Args:
+            method: HTTP method ('get' or 'post')
+            url: API endpoint URL
+            **kwargs: Additional arguments for requests method
+
+        Returns:
+            JSON response from API
+        """
+        if "headers" not in kwargs or kwargs["headers"] is None:
+            kwargs["headers"] = self._headers()
+
+        full_url = self.base_url + url
+        request_method = getattr(requests, method)
+        response = request_method(full_url, **kwargs)
+
+        if response.status_code == 401:
+            self._handle_token_refresh()
+            kwargs["headers"] = self._headers()
+            response = request_method(full_url, **kwargs)
+
+        return response.json()
+
+    def _get(self, url: str, params: dict = {}, headers: dict | None = None) -> dict:
+        """Override _get to handle 401 errors with token refresh."""
+        return self._make_request_with_retry("get", url, headers=headers, params=params)
+
+    def _post(
+        self, url: str, params: dict = {}, headers: dict | None = None
+    ) -> dict:
+        """Override _post to handle 401 errors with token refresh."""
+        return self._make_request_with_retry("post", url, headers=headers, json=params)
 
     def watchlist_movies(self):
         data = self._get("/users/me/watchlist")

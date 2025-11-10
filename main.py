@@ -1,11 +1,17 @@
+import logging
+
 import typer
 
 from shelfspace.apis.goodreads import get_books_from_csv
 from shelfspace.apis.hltb import HowlongAPI
 from shelfspace.apis.notion import NotionAPI
+from shelfspace.apis.secrets import get_trakt_secrets, save_trakt_secrets
 from shelfspace.apis.trakt import TraktAPI
 from shelfspace.cache import cached
 from shelfspace.models import Entry, Status
+
+
+logger = logging.getLogger(__name__)
 
 app = typer.Typer()
 
@@ -71,35 +77,54 @@ def process_games(auto: bool = False):
 @app.command()
 @cached()
 def list_movies():
-    api = TraktAPI()
+    secrets = get_trakt_secrets()
+    api = TraktAPI(**secrets)
     for movie in api.watchlist_movies():
         typer.echo(f"{movie.name} ({movie.type}) {movie.estimated} {movie.rating}")
+    
+    # Save tokens (in case they were refreshed during API calls)
+    save_trakt_secrets(
+        access_token=api.access_token,
+        refresh_token=api.refresh_token,
+    )
 
 
 @app.command()
 @cached()
 def process_movies(auto: bool = False):
     typer.echo("Fetching Trakt data...")
-    api = TraktAPI()
+    secrets = get_trakt_secrets()
+    api = TraktAPI(**secrets)
     entries = {entry.name: entry for entry in api.watchlist_movies()}
     add_new_entries_to_notion(entries, auto=auto)
+    
+    # Save tokens (in case they were refreshed during API calls)
+    save_trakt_secrets(**api._get_tokens())
 
 
 @app.command()
 @cached()
 def list_shows():
-    api = TraktAPI()
+    secrets = get_trakt_secrets()
+    api = TraktAPI(**secrets)
     for movie in api.watchlist_series():
         typer.echo(f"{movie.name} ({movie.type}) {movie.estimated}")
+    
+    # Save tokens (in case they were refreshed during API calls)
+    save_trakt_secrets(**api._get_tokens())
 
 
 @app.command()
 @cached()
 def process_shows(auto: bool = False):
     typer.echo("Fetching Trakt data...")
-    api = TraktAPI()
+    secrets = get_trakt_secrets()
+    api = TraktAPI(**secrets)
     entries = {entry.name: entry for entry in api.watchlist_series()}
     add_new_entries_to_notion(entries, auto=auto)
+    
+    # Save tokens (in case they were refreshed during API calls)
+    save_trakt_secrets(**api._get_tokens())
 
 
 if __name__ == "__main__":

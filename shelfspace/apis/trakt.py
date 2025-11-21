@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import date, datetime
 
 import requests
 
@@ -104,7 +104,7 @@ class TraktAPI(BaseAPI):
         """Override _post to handle 401 errors with token refresh."""
         return self._make_request_with_retry("post", url, headers=headers, json=params)
 
-    def watchlist_movies(self):
+    def watchlist_movies(self) -> list[Entry]:
         data = self._get("/users/me/watchlist")
         results = []
         for item in data:
@@ -140,7 +140,7 @@ class TraktAPI(BaseAPI):
 
         return results
 
-    def get_movie_data(self, movie_id: str):
+    def get_movie_data(self, movie_id: str) -> dict:
         cache_key = f"trakt:movie:{movie_id}"
         if cache_key in cache:
             return cache[cache_key]
@@ -159,7 +159,7 @@ class TraktAPI(BaseAPI):
 
         return data
 
-    def watchlist_series(self):
+    def watchlist_series(self) -> list[Entry]:
         data = self._get("/users/me/watchlist")
         results = []
         for item in data:
@@ -242,5 +242,22 @@ class TraktAPI(BaseAPI):
             )
 
         cache[cache_key] = result
+
+        return result
+
+    def get_upcoming_episodes(self, days=49) -> list[dict]:
+        calendar_data = self._get(f"/calendars/my/shows/{date.today().strftime('%Y-%m-%d')}/{days}")
+
+        result = []
+        for item in calendar_data:
+            result.append(
+                {
+                    "title": item["show"]["title"],
+                    "first_aired": item["first_aired"],
+                    "season": item["episode"]["season"],
+                    "episode": item["episode"]["number"],
+                    "runtime": item["episode"]["runtime"] or item["show"]["runtime"],
+                }
+            )
 
         return result

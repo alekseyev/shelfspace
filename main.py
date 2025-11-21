@@ -80,7 +80,7 @@ def list_movies():
     secrets = get_trakt_secrets()
     api = TraktAPI(**secrets)
     for movie in api.watchlist_movies():
-        typer.echo(f"{movie.name} ({movie.type}) {movie.estimated} {movie.rating}")
+        typer.echo(f"{movie.name} ({movie.release_date}) - {movie.estimated}h")
     
     # Save tokens (in case they were refreshed during API calls)
     save_trakt_secrets(
@@ -122,6 +122,35 @@ def process_shows(auto: bool = False):
     api = TraktAPI(**secrets)
     entries = {entry.name: entry for entry in api.watchlist_series()}
     add_new_entries_to_notion(entries, auto=auto)
+    
+    # Save tokens (in case they were refreshed during API calls)
+    save_trakt_secrets(**api._get_tokens())
+
+
+@app.command()
+@cached()
+def upcoming_episodes():
+    secrets = get_trakt_secrets()
+    api = TraktAPI(**secrets)
+    episodes = api.get_upcoming_episodes()
+    
+    # Group episodes by day
+    episodes_by_day = {}
+    for episode in episodes:
+        day = episode['first_aired'][:10]  # Extract YYYY-MM-DD
+        if day not in episodes_by_day:
+            episodes_by_day[day] = []
+        episodes_by_day[day].append(episode)
+    
+    # Display episodes grouped by day
+    for day in sorted(episodes_by_day.keys()):
+        typer.echo(f"\n📅 {day}")
+        for episode in episodes_by_day[day]:
+            typer.echo(
+                f"  {episode['title']} - "
+                f"S{episode['season']:02d}E{episode['episode']:02d} "
+                f"({episode['runtime']}min)"
+            )
     
     # Save tokens (in case they were refreshed during API calls)
     save_trakt_secrets(**api._get_tokens())

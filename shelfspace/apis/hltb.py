@@ -4,7 +4,7 @@ from fake_useragent import UserAgent
 from shelfspace.apis.base import BaseAPI
 from shelfspace.cache import cache
 from shelfspace.estimations import estimate_from_hltb
-from shelfspace.models import Entry, MediaType, Status
+from shelfspace.models import LegacyEntry, MediaType, Status
 
 
 class HowlongAPI(BaseAPI):
@@ -20,7 +20,7 @@ class HowlongAPI(BaseAPI):
             "referer": self.base_url,
         }
 
-    def get_games_list(self) -> list[Entry]:
+    def get_games_list(self) -> list[LegacyEntry]:
         lists = ["playing", "replays", "backlog", "completed", "retired"]
         game_list_result = self._post(
             f"/api/user/{self.user_id}/games/list",
@@ -55,7 +55,7 @@ class HowlongAPI(BaseAPI):
             game_data = self.get_game_data(game["game_id"])
             release_date = game_data["release_date"]
             results.append(
-                Entry(
+                LegacyEntry(
                     type=game_type,
                     name=game["custom_title"],
                     status=game_status,

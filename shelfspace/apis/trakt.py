@@ -5,7 +5,7 @@ import requests
 
 from shelfspace.apis.base import BaseAPI
 from shelfspace.estimations import estimate_episode, estimation_from_minutes
-from shelfspace.models import Entry, MediaType, Status
+from shelfspace.models import Entry, LegacyEntry, MediaType, Status
 from shelfspace.cache import cache
 
 
@@ -104,7 +104,7 @@ class TraktAPI(BaseAPI):
         """Override _post to handle 401 errors with token refresh."""
         return self._make_request_with_retry("post", url, headers=headers, json=params)
 
-    def watchlist_movies(self) -> list[Entry]:
+    def watchlist_movies_legacy(self) -> list[LegacyEntry]:
         data = self._get("/users/me/watchlist")
         results = []
         for item in data:
@@ -121,7 +121,7 @@ class TraktAPI(BaseAPI):
                 release_date = None
 
             results.append(
-                Entry(
+                LegacyEntry(
                     type=MediaType.MOVIE,
                     name=item["movie"]["title"],
                     estimated=estimation_from_minutes(int(movie_data["runtime"]))
@@ -134,6 +134,39 @@ class TraktAPI(BaseAPI):
                     metadata={
                         "trakt_id": item_id,
                         "trakt_status": movie_data["status"],
+                    },
+                )
+            )
+
+        return results
+
+    def watchlist_movies(self) -> list[Entry]:
+        data = self._get("/users/me/watchlist")
+        results = []
+        for item in data:
+            if item["type"] != "movie":
+                continue
+
+            item_id = item["movie"]["ids"]["trakt"]
+            movie_data = self.get_movie_data(item_id)
+            if movie_data["release_date"]:
+                release_date = datetime.fromisoformat(movie_data["release_date"])
+            else:
+                release_date = None
+
+            results.append(
+                Entry(
+                    type=MediaType.MOVIE,
+                    name=item["movie"]["title"],
+                    estimated=int(movie_data["runtime"])
+                    if movie_data["runtime"]
+                    else None,
+                    spent=None,
+                    status=Status.FUTURE,
+                    release_date=release_date,
+                    rating=int(movie_data["rating"]),
+                    metadata={
+                        "trakt_id": item_id,
                     },
                 )
             )
@@ -159,7 +192,7 @@ class TraktAPI(BaseAPI):
 
         return data
 
-    def watchlist_series(self) -> list[Entry]:
+    def watchlist_series(self) -> list[LegacyEntry]:
         data = self._get("/users/me/watchlist")
         results = []
         for item in data:
@@ -186,7 +219,7 @@ class TraktAPI(BaseAPI):
                 if len(seasons) > 1:
                     item_title = f"{item['show']['title']} S{season['number']}"
                 results.append(
-                    Entry(
+                    LegacyEntry(
                         type=MediaType.SERIES,
                         name=item_title,
                         estimated=season["total_est"] or None,

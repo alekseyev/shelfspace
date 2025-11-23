@@ -2,7 +2,7 @@ import json
 import os
 
 from shelfspace.apis.base import BaseAPI
-from shelfspace.models import Entry, MediaType, Status
+from shelfspace.models import LegacyEntry, MediaType, Status
 
 
 class NotionAPI(BaseAPI):
@@ -44,7 +44,7 @@ class NotionAPI(BaseAPI):
 
         return self.databases
 
-    def get_objects(self, database_id: str) -> list[Entry]:
+    def get_objects(self, database_id: str) -> list[LegacyEntry]:
         results = self._paginated_post(f"/databases/{database_id}/query")
         objects = []
         for object_data in results:
@@ -59,7 +59,7 @@ class NotionAPI(BaseAPI):
                 status = Status.CURRENT
             else:
                 status = Status.DONE
-            obj = Entry(
+            obj = LegacyEntry(
                 type=properties["Type"]["select"]["name"],
                 name="".join(t["plain_text"] for t in properties["Name"]["title"]),
                 notes="".join(
@@ -73,7 +73,7 @@ class NotionAPI(BaseAPI):
 
         return objects
 
-    def get_objects_by_type(self, types: list[MediaType]) -> list[Entry]:
+    def get_objects_by_type(self, types: list[MediaType]) -> list[LegacyEntry]:
         result = []
         for db_id in self.databases.values():
             objects = self.objects.get(db_id, [])
@@ -92,7 +92,7 @@ class NotionAPI(BaseAPI):
             total += len(objects)
         return total
 
-    def create_object(self, database_id: str, entry: Entry):
+    def create_object(self, database_id: str, entry: LegacyEntry):
         post_data = {
             "parent": {
                 "database_id": database_id,

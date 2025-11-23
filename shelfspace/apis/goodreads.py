@@ -1,7 +1,7 @@
 import csv
 import re
 
-from shelfspace.models import Entry, MediaType, Status
+from shelfspace.models import LegacyEntry, MediaType, Status
 from shelfspace.estimations import (
     estimate_book_from_pages,
     estimate_comic_book_from_pages,
@@ -21,7 +21,7 @@ def get_shelf_position(shelf_string: str, shelf: str) -> int:
         return INF * 2
 
 
-def get_books_from_csv(filename: str) -> list[Entry]:
+def get_books_from_csv(filename: str) -> list[LegacyEntry]:
     result = []
     with open(filename) as f:
         reader = csv.DictReader(f)
@@ -62,7 +62,7 @@ def get_books_from_csv(filename: str) -> list[Entry]:
             result.append(
                 (
                     index,
-                    Entry(
+                    LegacyEntry(
                         type=book_type,
                         name=f"{row['Author']} - {row['Title']}",
                         status=status,

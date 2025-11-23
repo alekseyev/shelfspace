@@ -1,6 +1,8 @@
+from datetime import date, datetime
 import enum
+from beanie import Document, Indexed
 from typing import Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class MediaType(str, enum.Enum):
@@ -24,8 +26,7 @@ class Status(str, enum.Enum):
     CURRENT = "CURRENT"
     DONE = "DONE"
 
-
-class Entry(BaseModel):
+class LegacyEntry(BaseModel):
     type: MediaType
     name: str
     notes: str = ""
@@ -36,3 +37,18 @@ class Entry(BaseModel):
     release_date: Optional[str] = ""
     rating: Optional[int] = None
     metadata: Optional[dict] = {}
+
+
+class Entry(Document):
+    type: MediaType
+    name: str
+    notes: str = ""
+    estimated: int | None = None
+    spent: int | None = None
+    status: Status | None = None
+    release_date: date | None = None
+    rating: int | None = None
+    metadata: dict = {}
+    shelf: Indexed(str) = ""
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)

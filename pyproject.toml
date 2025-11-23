@@ -5,7 +5,10 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+    "async-typer>=0.1.10",
+    "beanie>=2.0.1",
     "fake-useragent>=2.2.0",
+    "loguru>=0.7.3",
     "pydantic>=2.12.4",
     "python-dotenv>=1.2.1",
     "requests>=2.32.5",

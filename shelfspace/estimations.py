@@ -1,10 +1,6 @@
 def estimation_from_minutes(val: int) -> float:
-    """Add 5 minutes, round UP to 15 minutes, convert to hours"""
-    val += 5
-    if val < 600:
-        val += 15 - (val % 15)
-    else:
-        val += 60 - (val % 60)
+    """Round UP to 6 minutes, convert to hours"""
+    val += 6 - (val % 6)
     return val / 60
 
 

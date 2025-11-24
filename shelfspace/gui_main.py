@@ -50,21 +50,54 @@ async def load_entries():
     return entries_by_shelf
 
 
-async def update_entry_shelf(entry_id: str, new_shelf: str, refresh_func) -> None:
-    """Update an entry's shelf and refresh the display."""
-    entry_obj = await Entry.get(entry_id)
-    if entry_obj:
-        entry_obj.shelf = new_shelf if new_shelf != "Uncategorized" else ""
-        await entry_obj.save()
-        await refresh_func()
-
-
 def get_all_shelves() -> list[str]:
     """Get all possible shelf options."""
     return sorted(REQUIRED_SHELVES + ["Uncategorized"])
 
 
-def create_entry_card(entry: Entry, refresh_func) -> None:
+async def update_entry_shelf(entry_id: str, new_shelf: str, shelves_ui: dict) -> None:
+    """Update an entry's shelf and refresh affected shelf containers."""
+    entry_obj = await Entry.get(entry_id)
+    if not entry_obj:
+        return
+
+    old_shelf = entry_obj.shelf or "Uncategorized"
+    entry_obj.shelf = new_shelf if new_shelf != "Uncategorized" else ""
+    await entry_obj.save()
+
+    # Reload entries to update UI
+    entries_by_shelf = await load_entries()
+
+    # Update both old and new shelf containers if they exist
+    shelves_to_update = {old_shelf, new_shelf}
+    for shelf in shelves_to_update:
+        if shelf in shelves_ui:
+            container_ref = shelves_ui[shelf]
+            # Clear and rebuild the container
+            container_ref.clear()
+            shelf_entries = entries_by_shelf.get(shelf, [])
+            build_shelf_content(shelf, shelf_entries, shelves_ui, container_ref)
+
+
+def build_shelf_content(
+    shelf: str, entries: list[Entry], shelves_ui: dict, container
+) -> None:
+    """Build the content for a shelf container."""
+    entry_count = len(entries)
+    with container:
+        ui.label(f"📚 {shelf} ({entry_count})").classes("text-xl font-semibold")
+
+        if not entries:
+            ui.label("No entries yet").classes("text-center text-gray-400 py-4 italic")
+        else:
+            with ui.column().classes(
+                "w-full p-3 border-2 border-gray-300 rounded-lg bg-gray-50 gap-2"
+            ):
+                for entry in sorted(entries, key=lambda e: e.name):
+                    create_entry_card(entry, shelves_ui)
+
+
+def create_entry_card(entry: Entry, shelves_ui: dict) -> None:
     """Create a card for an entry with shelf selector."""
     with ui.card().classes("w-full").props('draggable="true"'):
         with ui.row().classes("w-full items-start justify-between"):
@@ -94,43 +127,22 @@ def create_entry_card(entry: Entry, refresh_func) -> None:
             # Shelf selector dropdown
             with ui.column().classes("ml-4 items-end"):
                 current_shelf = entry.shelf or "Uncategorized"
-                shelf_select = ui.select(
+
+                async def on_shelf_selected(new_shelf: str):
+                    await update_entry_shelf(str(entry.id), new_shelf, shelves_ui)
+
+                ui.select(
                     options=get_all_shelves(),
                     value=current_shelf,
+                    on_change=on_shelf_selected,
                 ).props("dense outlined")
-
-                async def on_shelf_changed(new_val: str):
-                    await update_entry_shelf(str(entry.id), new_val, refresh_func)
-
-                shelf_select.on_value_change(on_shelf_changed)
-
-
-def create_shelf_section(shelf: str, entries: list[Entry], refresh_func) -> None:
-    """Create a section for a shelf with all its entries."""
-    entry_count = len(entries)
-    with ui.column().classes("w-full gap-2"):
-        ui.label(f"📚 {shelf} ({entry_count})").classes("text-xl font-semibold")
-
-        if not entries:
-            ui.label("No entries yet").classes("text-center text-gray-400 py-4 italic")
-        else:
-            with ui.column().classes(
-                "w-full p-3 border-2 border-gray-300 rounded-lg bg-gray-50 gap-2"
-            ):
-                for entry in sorted(entries, key=lambda e: e.name):
-                    create_entry_card(entry, refresh_func)
 
 
 async def setup_ui():
     """Setup the main UI with all entries grouped by shelf."""
     entries_by_shelf = await load_entries()
 
-    async def refresh_entries():
-        """Refresh the entries display."""
-        # Trigger re-render by reloading the page
-        ui.run_javascript("location.reload();")
-
-    # Add drag-and-drop styles and scripts
+    # Add drag-and-drop styles
     ui.add_head_html(
         """
         <style>
@@ -164,9 +176,13 @@ async def setup_ui():
                 ),
             )
 
+            # Create containers for each shelf that we can update
+            shelves_ui = {}
             for shelf in sorted_shelves:
                 shelf_entries = entries_by_shelf[shelf]
-                create_shelf_section(shelf, shelf_entries, refresh_entries)
+                container = ui.column().classes("w-full gap-2")
+                shelves_ui[shelf] = container
+                build_shelf_content(shelf, shelf_entries, shelves_ui, container)
 
 
 # Create the page

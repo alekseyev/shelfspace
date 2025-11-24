@@ -1,4 +1,5 @@
 from nicegui import app, ui
+from nicegui.events import ValueChangeEventArguments
 
 from shelfspace.app_ctx import AppCtx
 from shelfspace.models import Entry
@@ -7,6 +8,7 @@ from shelfspace.utils import format_minutes
 
 # Define required shelves that should always be shown
 REQUIRED_SHELVES = ["Backlog", "Icebox"]
+DEFAULT_SHELF = "Icebox"
 
 
 def get_emoji_for_type(media_type):
@@ -29,7 +31,7 @@ def get_emoji_for_type(media_type):
     return emoji_map.get(media_type, "📌")
 
 
-async def load_entries():
+async def load_entries() -> dict[str, list[Entry]]:
     """Load all entries from the database grouped by shelf."""
     await AppCtx.ensure_initialized()
     entries = await Entry.find().to_list()
@@ -37,7 +39,7 @@ async def load_entries():
     # Group entries by shelf
     entries_by_shelf = {}
     for entry in entries:
-        shelf = entry.shelf or "Uncategorized"
+        shelf = entry.shelf or DEFAULT_SHELF
         if shelf not in entries_by_shelf:
             entries_by_shelf[shelf] = []
         entries_by_shelf[shelf].append(entry)
@@ -52,7 +54,7 @@ async def load_entries():
 
 def get_all_shelves() -> list[str]:
     """Get all possible shelf options."""
-    return sorted(REQUIRED_SHELVES + ["Uncategorized"])
+    return sorted(REQUIRED_SHELVES)
 
 
 async def update_entry_shelf(entry_id: str, new_shelf: str, shelves_ui: dict) -> None:
@@ -61,8 +63,8 @@ async def update_entry_shelf(entry_id: str, new_shelf: str, shelves_ui: dict) ->
     if not entry_obj:
         return
 
-    old_shelf = entry_obj.shelf or "Uncategorized"
-    entry_obj.shelf = new_shelf if new_shelf != "Uncategorized" else ""
+    old_shelf = entry_obj.shelf or DEFAULT_SHELF
+    entry_obj.shelf = new_shelf
     await entry_obj.save()
 
     # Reload entries to update UI
@@ -126,13 +128,14 @@ def create_entry_card(entry: Entry, shelves_ui: dict) -> None:
 
             # Shelf selector dropdown
             with ui.column().classes("ml-4 items-end"):
-                current_shelf = entry.shelf or "Uncategorized"
+                current_shelf = entry.shelf or DEFAULT_SHELF
                 entry_id_captured = str(entry.id)
 
                 # Define callback that captures entry_id separately
                 def make_callback(eid: str, ui_ref: dict):
-                    async def on_shelf_selected(new_shelf: str):
-                        await update_entry_shelf(eid, new_shelf, ui_ref)
+                    async def on_shelf_selected(e: ValueChangeEventArguments):
+                        await update_entry_shelf(eid, e.value, ui_ref)
+
                     return on_shelf_selected
 
                 ui.select(

@@ -127,14 +127,18 @@ def create_entry_card(entry: Entry, shelves_ui: dict) -> None:
             # Shelf selector dropdown
             with ui.column().classes("ml-4 items-end"):
                 current_shelf = entry.shelf or "Uncategorized"
+                entry_id_captured = str(entry.id)
 
-                async def on_shelf_selected(new_shelf: str):
-                    await update_entry_shelf(str(entry.id), new_shelf, shelves_ui)
+                # Define callback that captures entry_id separately
+                def make_callback(eid: str, ui_ref: dict):
+                    async def on_shelf_selected(new_shelf: str):
+                        await update_entry_shelf(eid, new_shelf, ui_ref)
+                    return on_shelf_selected
 
                 ui.select(
                     options=get_all_shelves(),
                     value=current_shelf,
-                    on_change=on_shelf_selected,
+                    on_change=make_callback(entry_id_captured, shelves_ui),
                 ).props("dense outlined")
 
 

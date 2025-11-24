@@ -5,6 +5,7 @@ from shelfspace.apis.secrets import get_trakt_secrets, save_trakt_secrets
 from shelfspace.apis.trakt import TraktAPI
 from shelfspace.models import Entry
 from shelfspace.utils import format_minutes
+from shelfspace.settings import settings
 
 from async_typer import AsyncTyper
 from pymongo import AsyncMongoClient
@@ -13,9 +14,9 @@ app = AsyncTyper()
 
 
 async def init_db():
-    mongo_client = AsyncMongoClient("mongodb://root:secret@localhost:4001")
+    mongo_client = AsyncMongoClient(settings.MONGO_URL)
     await init_beanie(
-        database=mongo_client["shelfspace"],
+        database=mongo_client[settings.MONGO_DB],
         document_models=[Entry],
     )
 

@@ -1,8 +1,9 @@
 """Encapsulates secrets management for API authentication."""
 
 import json
-import os
 from pathlib import Path
+
+from shelfspace.settings import settings
 
 
 SECRETS_FILE = Path(__file__).parent.parent.parent / "secrets.json"
@@ -45,10 +46,10 @@ def get_trakt_secrets() -> dict[str, str | None]:
     trakt_secrets = secrets.get("trakt", {})
 
     return {
-        "client_id": os.environ["TRAKT_CLIENT_ID"],
+        "client_id": settings.TRAKT_CLIENT_ID,
         "access_token": trakt_secrets.get("access_token"),
         "refresh_token": trakt_secrets.get("refresh_token"),
-        "client_secret": os.environ["TRAKT_CLIENT_SECRET"],
+        "client_secret": settings.TRAKT_CLIENT_SECRET,
     }
 
 
@@ -71,4 +72,3 @@ def save_trakt_secrets(
         "refresh_token": refresh_token,
     }
     _save_secrets_file(secrets)
-

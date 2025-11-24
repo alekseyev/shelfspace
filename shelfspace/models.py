@@ -26,6 +26,7 @@ class Status(str, enum.Enum):
     CURRENT = "CURRENT"
     DONE = "DONE"
 
+
 class LegacyEntry(BaseModel):
     type: MediaType
     name: str
@@ -52,3 +53,6 @@ class Entry(Document):
     shelf: Indexed(str) = ""
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+beanie_models = [Entry]

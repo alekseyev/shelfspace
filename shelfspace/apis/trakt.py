@@ -67,9 +67,7 @@ class TraktAPI(BaseAPI):
             "refresh_token": self.refresh_token,
         }
 
-    def _make_request_with_retry(
-        self, method: str, url: str, **kwargs
-    ) -> dict:
+    def _make_request_with_retry(self, method: str, url: str, **kwargs) -> dict:
         """Make HTTP request with automatic token refresh on 401.
 
         Args:
@@ -98,9 +96,7 @@ class TraktAPI(BaseAPI):
         """Override _get to handle 401 errors with token refresh."""
         return self._make_request_with_retry("get", url, headers=headers, params=params)
 
-    def _post(
-        self, url: str, params: dict = {}, headers: dict | None = None
-    ) -> dict:
+    def _post(self, url: str, params: dict = {}, headers: dict | None = None) -> dict:
         """Override _post to handle 401 errors with token refresh."""
         return self._make_request_with_retry("post", url, headers=headers, json=params)
 
@@ -279,7 +275,9 @@ class TraktAPI(BaseAPI):
         return result
 
     def get_upcoming_episodes(self, days=49) -> list[dict]:
-        calendar_data = self._get(f"/calendars/my/shows/{date.today().strftime('%Y-%m-%d')}/{days}")
+        calendar_data = self._get(
+            f"/calendars/my/shows/{date.today().strftime('%Y-%m-%d')}/{days}"
+        )
 
         result = []
         for item in calendar_data:

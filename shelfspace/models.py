@@ -5,9 +5,18 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 
+"""
+Entries are the main objects in the database.
+They are used to store the information about the media that you are tracking. Entry may represent a project, a course, a movie, a series, a game, a book, an article, a talk/video, etc.
+
+Subentries are the sub-objects of an entry. They may represent a chapter, an episode, or a chunk of a media, or even multiple views of the same movie, particularly when you want to put parts of a single entry into different shelves.
+
+Shelves are the shelves that you can put your subentries into. Default shelves are backlog and icebox for unstarted entries. Other shelves have start and end dates (so they are like a sprint in a kanban board).
+"""
+
+
 class MediaType(str, enum.Enum):
     PROJECTS = "Projects"
-    DUO = "Duolingo"
     COURSE = "Course"
     MOVIE = "Movie"
     SERIES = "Series"
@@ -40,17 +49,34 @@ class LegacyEntry(BaseModel):
     metadata: Optional[dict] = {}
 
 
+class Shelf(Document):
+    name: str
+    start_date: date | None = None
+    end_date: date | None = None
+    description: str = ""
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class SubEntry(BaseModel):
+    shelf: Indexed(str) = ""
+    name: str = ""
+    estimated: int | None = None
+    spent: int | None = 0
+    is_finished: bool = False
+    release_date: date | None = None
+    metadata: dict = {}
+
+
 class Entry(Document):
     type: MediaType
     name: str
     notes: str = ""
-    estimated: int | None = None
-    spent: int | None = None
-    status: Status | None = None
     release_date: date | None = None
     rating: int | None = None
     metadata: dict = {}
-    shelf: Indexed(str) = ""
+    links: list[str] = []
+    subentries: list[SubEntry] = []
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 

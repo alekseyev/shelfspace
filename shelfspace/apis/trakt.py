@@ -1,15 +1,12 @@
-import logging
 from datetime import date, datetime
 
+from loguru import logger
 import requests
 
 from shelfspace.apis.base import BaseAPI
 from shelfspace.estimations import estimate_episode, estimation_from_minutes
-from shelfspace.models import Entry, LegacyEntry, MediaType, Status
+from shelfspace.models import LegacyEntry, MediaType, Status
 from shelfspace.cache import cache
-
-
-logger = logging.getLogger(__name__)
 
 
 class TraktAPI(BaseAPI):
@@ -29,8 +26,8 @@ class TraktAPI(BaseAPI):
 
     def _refresh_token(self) -> dict:
         # https://trakt.docs.apiary.io/#reference/authentication-oauth/get-token
-        data = self._post(
-            "/oauth/token",
+        response = requests.post(
+            f"{self.base_url}/oauth/token",
             {
                 "refresh_token": self.refresh_token,
                 "client_id": self.client_id,
@@ -41,10 +38,12 @@ class TraktAPI(BaseAPI):
             headers={"Content-Type": "application/json"},
         )
 
-        return {
-            "access_token": data["access_token"],
-            "refresh_token": data["refresh_token"],
-        }
+        if response.status_code != 200:
+            raise Exception(
+                f"Failed to refresh Trakt API tokens: {response.status_code} {response.text}"
+            )
+
+        return response.json()
 
     def _headers(self) -> dict:
         return {
@@ -89,6 +88,11 @@ class TraktAPI(BaseAPI):
             self._handle_token_refresh()
             kwargs["headers"] = self._headers()
             response = request_method(full_url, **kwargs)
+
+        if response.status_code != 200:
+            raise Exception(
+                f"Failed to make {method} request to {full_url}: {response.status_code} {response.text}"
+            )
 
         return response.json()
 
@@ -136,7 +140,7 @@ class TraktAPI(BaseAPI):
 
         return results
 
-    def watchlist_movies(self) -> list[Entry]:
+    def watchlist_movies(self) -> dict:
         data = self._get("/users/me/watchlist")
         results = []
         for item in data:
@@ -151,8 +155,7 @@ class TraktAPI(BaseAPI):
                 release_date = None
 
             results.append(
-                Entry(
-                    type=MediaType.MOVIE,
+                dict(
                     name=item["movie"]["title"],
                     estimated=int(movie_data["runtime"])
                     if movie_data["runtime"]
@@ -161,9 +164,8 @@ class TraktAPI(BaseAPI):
                     status=Status.FUTURE,
                     release_date=release_date,
                     rating=int(movie_data["rating"]),
-                    metadata={
-                        "trakt_id": item_id,
-                    },
+                    trakt_id=item_id,
+                    slug=item["movie"]["ids"]["slug"],
                 )
             )
 

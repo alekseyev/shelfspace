@@ -3,7 +3,7 @@ import typer
 
 from shelfspace.apis.secrets import get_trakt_secrets, save_trakt_secrets
 from shelfspace.apis.trakt import TraktAPI
-from shelfspace.models import Entry
+from shelfspace.models import Entry, MediaType, SubEntry
 from shelfspace.utils import format_minutes
 from shelfspace.settings import settings
 
@@ -47,8 +47,27 @@ async def process_movies():
     typer.echo("Fetching Trakt data...")
     secrets = get_trakt_secrets()
     api = TraktAPI(**secrets)
-    entries = api.watchlist_movies()
-    await add_new_entries(entries)
+    movies = api.watchlist_movies()
+    for movie in movies:
+        if await Entry.find_one(Entry.metadata["trakt_id"] == movie["trakt_id"]):
+            continue
+        entry = Entry(
+            type=MediaType.MOVIE.value,
+            name=movie["name"],
+            subentries=[
+                SubEntry(
+                    shelf="Icebox",
+                    estimated=movie["estimated"],
+                    release_date=movie["release_date"],
+                )
+            ],
+            release_date=movie["release_date"],
+            metadata={"trakt_id": movie["trakt_id"]},
+            links=[f"https://trakt.tv/movies/{movie['slug']}"],
+            rating=movie["rating"],
+        )
+        typer.echo(f"Adding {entry.name} to Icebox")
+        await entry.save()
 
     # Save tokens (in case they were refreshed during API calls)
     save_trakt_secrets(**api._get_tokens())
@@ -82,10 +101,11 @@ async def list_entries():
     # Group entries by shelf
     entries_by_shelf = {}
     for entry in entries:
-        shelf = entry.shelf or "Uncategorized"
-        if shelf not in entries_by_shelf:
-            entries_by_shelf[shelf] = []
-        entries_by_shelf[shelf].append(entry)
+        for subentry in entry.subentries:
+            shelf = subentry.shelf or "Uncategorized"
+            if shelf not in entries_by_shelf:
+                entries_by_shelf[shelf] = []
+            entries_by_shelf[shelf].append(entry)
 
     # Display entries grouped by shelf
     for shelf in sorted(entries_by_shelf.keys()):
@@ -96,7 +116,9 @@ async def list_entries():
             emoji = get_emoji_for_type(entry.type)
             year = entry.release_date.year if entry.release_date else "N/A"
             estimated_formatted = (
-                format_minutes(entry.estimated) if entry.estimated else "N/A"
+                format_minutes(entry.subentries[0].estimated)
+                if entry.subentries[0].estimated
+                else "N/A"
             )
             typer.echo(
                 f"  {emoji} \033[1m{entry.name}\033[0m ({year}) - {estimated_formatted}"

@@ -166,6 +166,32 @@ class TraktAPI(BaseAPI):
 
         return results
 
+    def get_shows(self, list_slug: str | None = None) -> list[dict]:
+        """Fetch shows from a list or watchlist.
+
+        Args:
+            list_slug: Custom list slug. If None, fetches from watchlist.
+        """
+        if list_slug:
+            data = self._get(f"/users/me/lists/{list_slug}/items")
+        else:
+            data = self._get("/users/me/watchlist")
+
+        results = []
+        for item in data:
+            if item["type"] != "show":
+                continue
+
+            results.append(
+                dict(
+                    name=item["show"]["title"],
+                    trakt_id=item["show"]["ids"]["trakt"],
+                    slug=item["show"]["ids"]["slug"],
+                )
+            )
+
+        return results
+
     def get_movie_data(self, movie_id: str) -> dict:
         cache_key = f"trakt:movie:{movie_id}"
         if cache_key in cache:
@@ -226,43 +252,100 @@ class TraktAPI(BaseAPI):
 
         return results
 
+    def get_seasons_summary(self, show_id: str) -> list[dict]:
+        """Fetch season metadata without episode details.
+
+        Returns list of dicts with season number and episode count.
+        """
+        cache_key = f"trakt:show_seasons:{show_id}"
+        if cache_key in cache:
+            return cache[cache_key]
+
+        seasons_data = self._get(f"/shows/{show_id}/seasons", {"extended": "full"})
+        result = [
+            {"number": s["number"], "episode_count": s["episode_count"]}
+            for s in seasons_data
+        ]
+
+        cache[cache_key] = result
+        return result
+
+    def get_season_episodes(self, show_id: str, season_number: int) -> list[dict]:
+        """Fetch all episodes for a season in a single API call.
+
+        Returns list of episode dicts with number, runtime, est, first_aired.
+        """
+        cache_key = f"trakt:show_season:{show_id}:{season_number}"
+        if cache_key in cache:
+            return cache[cache_key]
+
+        episodes_data = self._get(
+            f"/shows/{show_id}/seasons/{season_number}", {"extended": "full"}
+        )
+
+        episodes = []
+        for ep in episodes_data:
+            est = estimate_episode(ep["runtime"]) if ep["runtime"] else 0
+            episodes.append(
+                {
+                    "number": ep["number"],
+                    "runtime": ep["runtime"],
+                    "est": est / 60,
+                    "first_aired": ep["first_aired"],
+                }
+            )
+
+        cache[cache_key] = episodes
+        return episodes
+
+    def get_episode_data(
+        self, show_id: str, season_number: int, episode_number: int
+    ) -> dict:
+        """Fetch data for a single episode."""
+        cache_key = f"trakt:episode:{show_id}:{season_number}:{episode_number}"
+        if cache_key in cache:
+            return cache[cache_key]
+
+        episode_data = self._get(
+            f"/shows/{show_id}/seasons/{season_number}/episodes/{episode_number}",
+            {"extended": "full"},
+        )
+
+        est = (
+            estimate_episode(episode_data["runtime"]) if episode_data["runtime"] else 0
+        )
+        result = {
+            "number": episode_number,
+            "runtime": episode_data["runtime"],
+            "est": est / 60,
+            "first_aired": episode_data["first_aired"],
+        }
+
+        cache[cache_key] = result
+        return result
+
     def get_series_data(self, show_id: str) -> list[dict]:
+        """Fetch full series data with all episodes.
+
+        Uses batch endpoint for episodes (1 API call per season instead of per episode).
+        """
         cache_key = f"trakt:show:{show_id}"
         if cache_key in cache:
             return cache[cache_key]
 
         result = []
-        seasons_data = self._get(f"/shows/{show_id}/seasons", {"extended": "full"})
+        seasons = self.get_seasons_summary(show_id)
 
-        for season in seasons_data:
+        for season in seasons:
             season_number = season["number"]
-            episode_count = season["episode_count"]
+            episodes = self.get_season_episodes(show_id, season_number)
 
-            episodes = []
-            total_est = 0
-            for ep_index in range(1, episode_count + 1):
-                episode_data = self._get(
-                    f"/shows/{show_id}/seasons/{season_number}/episodes/{ep_index}",
-                    {"extended": "full"},
-                )
-                est = (
-                    estimate_episode(episode_data["runtime"])
-                    if episode_data["runtime"]
-                    else 0
-                )
-                episodes.append(
-                    {
-                        "runtime": episode_data["runtime"],
-                        "est": est / 60,
-                        "first_aired": episode_data["first_aired"],
-                    }
-                )
-                total_est += est
+            total_est = sum(ep["est"] for ep in episodes)
 
             result.append(
                 {
                     "number": season_number,
-                    "total_est": total_est / 60,
+                    "total_est": total_est,
                     "episodes": episodes,
                 }
             )

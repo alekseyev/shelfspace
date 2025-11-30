@@ -96,6 +96,114 @@ async def process_movies():
     save_trakt_secrets(**api._get_tokens())
 
 
+@app.async_command()
+async def process_shows():
+    await init_db()
+    typer.echo("Fetching Trakt data...")
+    secrets = get_trakt_secrets()
+    api = TraktAPI(**secrets)
+
+    # Fetch shows from watchlist and maybe list
+    typer.echo("Fetching watchlist shows...")
+    watchlist_shows = api.get_shows()
+    typer.echo("Fetching maybe list shows...")
+    maybe_shows = api.get_shows("maybe")
+
+    # Combine and deduplicate by trakt_id
+    shows_by_id = {s["trakt_id"]: s for s in watchlist_shows}
+    for show in maybe_shows:
+        if show["trakt_id"] not in shows_by_id:
+            shows_by_id[show["trakt_id"]] = show
+
+    typer.echo(f"Found {len(shows_by_id)} unique shows")
+
+    for show in shows_by_id.values():
+        show_trakt_id = show["trakt_id"]
+
+        # Check if show already has any entries in DB - skip API calls if so
+        existing_entry = await Entry.find_one(
+            Entry.metadata["show_trakt_id"] == show_trakt_id
+        )
+        if existing_entry:
+            typer.echo(f"Skipping {show['name']} (already in DB)")
+            continue
+
+        typer.echo(f"Processing {show['name']}...")
+
+        # First get season summary (cheap API call) to determine season count
+        seasons_summary = api.get_seasons_summary(show_trakt_id)
+        # Filter out specials (season 0)
+        valid_seasons = [s for s in seasons_summary if s["number"]]
+        is_multi_season = len(valid_seasons) > 1
+
+        for season_info in valid_seasons:
+            season_number = season_info["number"]
+            season_trakt_id = f"{show_trakt_id}_s{season_number}"
+
+            # Check if this specific season already exists
+            if await Entry.find_one(Entry.metadata["trakt_id"] == season_trakt_id):
+                continue
+
+            # Only fetch episode data when we need to add the entry
+            episodes = api.get_season_episodes(show_trakt_id, season_number)
+
+            # Skip seasons with no episodes or no first_aired date
+            if not episodes:
+                continue
+            if not episodes[0]["first_aired"]:
+                continue
+
+            # Build entry name: "Show Name" for single season, "Show Name S2" for multiple
+            entry_name = (
+                f"{show['name']} S{season_number}" if is_multi_season else show["name"]
+            )
+
+            # Build subentries for each episode
+            subentries = []
+            for episode in episodes:
+                ep_number = episode["number"]
+                ep_name = f"S{season_number:02d}E{ep_number:02d}"
+
+                release_date = None
+                if episode["first_aired"]:
+                    # Parse ISO format and convert to date
+                    aired_dt = datetime.fromisoformat(
+                        episode["first_aired"].replace("Z", "+00:00")
+                    )
+                    release_date = aired_dt.date()
+
+                subentries.append(
+                    SubEntry(
+                        shelf="Icebox",
+                        name=ep_name,
+                        estimated=episode["runtime"],
+                        release_date=release_date,
+                    )
+                )
+
+            # Get first episode's release date for the entry
+            entry_release_date = subentries[0].release_date if subentries else None
+
+            entry = Entry(
+                type=MediaType.SERIES.value,
+                name=entry_name,
+                subentries=subentries,
+                release_date=entry_release_date,
+                metadata={
+                    "trakt_id": season_trakt_id,
+                    "show_trakt_id": show_trakt_id,
+                },
+                links=[
+                    f"https://trakt.tv/shows/{show['slug']}/seasons/{season_number}"
+                ],
+            )
+            typer.echo(f"Adding {entry.name} ({len(subentries)} episodes) to Icebox")
+            await entry.save()
+
+    # Save tokens (in case they were refreshed during API calls)
+    save_trakt_secrets(**api._get_tokens())
+
+
 def get_emoji_for_type(media_type):
     """Get emoji representation for media type."""
     emoji_map = {
@@ -121,31 +229,56 @@ async def list_entries():
     await init_db()
     entries = await Entry.find().to_list()
 
-    # Group entries by shelf
-    entries_by_shelf = {}
+    # Group entries by shelf (store entry with its relevant subentries for that shelf)
+    entries_by_shelf: dict[str, list[tuple[Entry, list[SubEntry]]]] = {}
     for entry in entries:
+        # Group subentries by shelf
+        subentries_by_shelf: dict[str, list[SubEntry]] = {}
         for subentry in entry.subentries:
             shelf = subentry.shelf or "Uncategorized"
+            if shelf not in subentries_by_shelf:
+                subentries_by_shelf[shelf] = []
+            subentries_by_shelf[shelf].append(subentry)
+
+        # Add entry to each shelf it appears in
+        for shelf, subentries in subentries_by_shelf.items():
             if shelf not in entries_by_shelf:
                 entries_by_shelf[shelf] = []
-            entries_by_shelf[shelf].append(entry)
+            entries_by_shelf[shelf].append((entry, subentries))
 
     # Display entries grouped by shelf
     for shelf in sorted(entries_by_shelf.keys()):
         typer.echo(f"\n📚 {shelf}")
         shelf_entries = entries_by_shelf[shelf]
 
-        for entry in sorted(shelf_entries, key=lambda e: e.name):
+        for entry, subentries in sorted(shelf_entries, key=lambda x: x[0].name):
             emoji = get_emoji_for_type(entry.type)
             year = entry.release_date.year if entry.release_date else "N/A"
-            estimated_formatted = (
-                format_minutes(entry.subentries[0].estimated)
-                if entry.subentries[0].estimated
-                else "N/A"
-            )
-            typer.echo(
-                f"  {emoji} \033[1m{entry.name}\033[0m ({year}) - {estimated_formatted}"
-            )
+
+            if len(subentries) == 1:
+                # Single subentry: show on one line
+                sub = subentries[0]
+                estimated_formatted = (
+                    format_minutes(sub.estimated) if sub.estimated else "N/A"
+                )
+                typer.echo(
+                    f"  {emoji} \033[1m{entry.name}\033[0m ({year}) - {estimated_formatted}"
+                )
+            else:
+                # Multiple subentries: show entry header then list subentries
+                total_estimated = sum(s.estimated or 0 for s in subentries)
+                total_formatted = (
+                    format_minutes(total_estimated) if total_estimated else "N/A"
+                )
+                typer.echo(
+                    f"  {emoji} \033[1m{entry.name}\033[0m ({year}) - {total_formatted} total"
+                )
+                for sub in subentries:
+                    sub_name = sub.name or "(unnamed)"
+                    sub_estimated = (
+                        format_minutes(sub.estimated) if sub.estimated else "N/A"
+                    )
+                    typer.echo(f"      └─ {sub_name}: {sub_estimated}")
 
 
 if __name__ == "__main__":

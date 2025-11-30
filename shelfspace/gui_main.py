@@ -1,3 +1,4 @@
+from fastapi import Request
 from nicegui import app, ui
 from nicegui.events import ValueChangeEventArguments
 
@@ -9,6 +10,9 @@ from shelfspace.utils import format_minutes
 # Define required shelves that should always be shown
 REQUIRED_SHELVES = ["Backlog", "Icebox"]
 DEFAULT_SHELF = "Icebox"
+
+# Global reference to shelves_ui for drag-drop handling
+_shelves_ui_ref: dict = {}
 
 
 def get_emoji_for_type(media_type):
@@ -34,7 +38,7 @@ def get_emoji_for_type(media_type):
 async def load_subentries() -> dict[str, list[tuple[Entry, SubEntry]]]:
     """
     Load all subentries from the database grouped by shelf.
-    
+
     Returns a dict mapping shelf names to lists of (entry, subentry) tuples.
     """
     await AppCtx.ensure_initialized()
@@ -81,6 +85,9 @@ async def update_subentry_shelf(
         return
 
     old_shelf = subentry.shelf or DEFAULT_SHELF
+    if old_shelf == new_shelf:
+        return  # No change needed
+
     subentry.shelf = new_shelf
     await entry_obj.save()
 
@@ -98,6 +105,50 @@ async def update_subentry_shelf(
             build_shelf_content(shelf, shelf_subentries, shelves_ui, container_ref)
 
 
+async def handle_drop(entry_id: str, subentry_name: str, target_shelf: str) -> None:
+    """Handle a drag-drop event to move subentry to a new shelf."""
+    global _shelves_ui_ref
+    await update_subentry_shelf(entry_id, subentry_name, target_shelf, _shelves_ui_ref)
+
+
+# REST endpoint for drag-drop operations
+@app.post("/api/move-entry")
+async def move_entry_api(request: Request):
+    """API endpoint for moving entries between shelves via drag-drop."""
+    data = await request.json()
+    entry_id = data.get("entry_id")
+    subentry_name = data.get("subentry_name", "")
+    target_shelf = data.get("target_shelf")
+
+    if not entry_id or not target_shelf:
+        return {"success": False, "error": "Missing required fields"}
+
+    try:
+        entry_obj = await Entry.get(entry_id)
+        if not entry_obj:
+            return {"success": False, "error": "Entry not found"}
+
+        # Find the subentry and update its shelf
+        subentry = None
+        for se in entry_obj.subentries:
+            if se.name == subentry_name:
+                subentry = se
+                break
+
+        if not subentry:
+            return {"success": False, "error": "Subentry not found"}
+
+        old_shelf = subentry.shelf or DEFAULT_SHELF
+        if old_shelf == target_shelf:
+            return {"success": True, "message": "No change needed"}
+
+        subentry.shelf = target_shelf
+        await entry_obj.save()
+        return {"success": True, "old_shelf": old_shelf, "new_shelf": target_shelf}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 def build_shelf_content(
     shelf: str,
     subentries: list[tuple[Entry, SubEntry]],
@@ -109,12 +160,18 @@ def build_shelf_content(
     with container:
         ui.label(f"📚 {shelf} ({subentry_count})").classes("text-xl font-semibold")
 
-        if not subentries:
-            ui.label("No entries yet").classes("text-center text-gray-400 py-4 italic")
-        else:
-            with ui.column().classes(
-                "w-full p-3 border-2 border-gray-300 rounded-lg bg-gray-50 gap-2"
-            ):
+        # Create the drop zone for this shelf
+        drop_zone = ui.column().classes(
+            "w-full p-3 border-2 border-dashed border-gray-300 rounded-lg bg-gray-50 gap-2 min-h-[80px] shelf-drop-zone"
+        )
+        drop_zone._props["data-shelf"] = shelf
+
+        with drop_zone:
+            if not subentries:
+                ui.label("Drop entries here").classes(
+                    "text-center text-gray-400 py-4 italic w-full"
+                )
+            else:
                 for entry, subentry in sorted(
                     subentries, key=lambda x: x[1].name or x[0].name
                 ):
@@ -123,13 +180,21 @@ def build_shelf_content(
 
 def create_subentry_card(entry: Entry, subentry: SubEntry, shelves_ui: dict) -> None:
     """Create a card for a subentry with shelf selector."""
-    with ui.card().classes("w-full").props('draggable="true"'):
+    entry_id = str(entry.id)
+    subentry_name_val = subentry.name or ""
+
+    card = ui.card().classes("w-full draggable-card")
+    card._props["draggable"] = "true"
+    card._props["data-entry-id"] = entry_id
+    card._props["data-subentry-name"] = subentry_name_val
+
+    with card:
         with ui.row().classes("w-full items-start justify-between"):
             with ui.column().classes("flex-1 gap-2"):
                 emoji = get_emoji_for_type(entry.type)
                 year = entry.release_date.year if entry.release_date else "N/A"
                 subentry_name = subentry.name or entry.name
-                
+
                 estimated_formatted = (
                     format_minutes(subentry.estimated) if subentry.estimated else "N/A"
                 )
@@ -176,22 +241,122 @@ def create_subentry_card(entry: Entry, subentry: SubEntry, shelves_ui: dict) -> 
 
 async def setup_ui():
     """Setup the main UI with all subentries grouped by shelf."""
+    global _shelves_ui_ref
     subentries_by_shelf = await load_subentries()
 
-    # Add drag-and-drop styles
+    # Add drag-and-drop styles and JavaScript
     ui.add_head_html(
         """
         <style>
-        [draggable="true"] {
+        .draggable-card {
             cursor: grab;
             opacity: 1;
-            transition: opacity 0.2s;
+            transition: opacity 0.2s, transform 0.2s;
         }
-        [draggable="true"]:active {
+        .draggable-card:active {
             cursor: grabbing;
-            opacity: 0.7;
+        }
+        .draggable-card.dragging {
+            opacity: 0.5;
+            transform: scale(0.98);
+        }
+        .shelf-drop-zone {
+            transition: background-color 0.2s, border-color 0.2s;
+        }
+        .shelf-drop-zone.drag-over {
+            background-color: #dbeafe !important;
+            border-color: #3b82f6 !important;
         }
         </style>
+        """
+    )
+
+    # Add JavaScript for drag-drop handling
+    ui.add_body_html(
+        """
+        <script>
+        // Store drag data globally since dataTransfer is not always accessible
+        window.dragData = null;
+
+        document.addEventListener('dragstart', function(e) {
+            const card = e.target.closest('.draggable-card');
+            if (card) {
+                card.classList.add('dragging');
+                const entryId = card.getAttribute('data-entry-id');
+                const subentryName = card.getAttribute('data-subentry-name');
+                window.dragData = { entry_id: entryId, subentry_name: subentryName };
+                e.dataTransfer.effectAllowed = 'move';
+                e.dataTransfer.setData('text/plain', JSON.stringify(window.dragData));
+            }
+        });
+
+        document.addEventListener('dragend', function(e) {
+            const card = e.target.closest('.draggable-card');
+            if (card) {
+                card.classList.remove('dragging');
+            }
+            // Remove drag-over styling from all drop zones
+            document.querySelectorAll('.shelf-drop-zone').forEach(zone => {
+                zone.classList.remove('drag-over');
+            });
+        });
+
+        document.addEventListener('dragover', function(e) {
+            const dropZone = e.target.closest('.shelf-drop-zone');
+            if (dropZone && window.dragData) {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = 'move';
+                dropZone.classList.add('drag-over');
+            }
+        });
+
+        document.addEventListener('dragleave', function(e) {
+            const dropZone = e.target.closest('.shelf-drop-zone');
+            if (dropZone) {
+                // Only remove if we're actually leaving the drop zone
+                const rect = dropZone.getBoundingClientRect();
+                if (e.clientX < rect.left || e.clientX > rect.right ||
+                    e.clientY < rect.top || e.clientY > rect.bottom) {
+                    dropZone.classList.remove('drag-over');
+                }
+            }
+        });
+
+        document.addEventListener('drop', async function(e) {
+            const dropZone = e.target.closest('.shelf-drop-zone');
+            if (dropZone && window.dragData) {
+                e.preventDefault();
+                dropZone.classList.remove('drag-over');
+                const targetShelf = dropZone.getAttribute('data-shelf');
+                if (targetShelf && window.dragData.entry_id) {
+                    // Call the API endpoint to move the entry
+                    try {
+                        const response = await fetch('/api/move-entry', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                            },
+                            body: JSON.stringify({
+                                entry_id: window.dragData.entry_id,
+                                subentry_name: window.dragData.subentry_name,
+                                target_shelf: targetShelf
+                            })
+                        });
+                        const result = await response.json();
+                        if (result.success) {
+                            // Reload the page to reflect changes
+                            location.reload();
+                        } else {
+                            console.error('Move failed:', result.error);
+                        }
+                    } catch (error) {
+                        console.error('API call failed:', error);
+                    }
+                }
+                window.dragData = null;
+            }
+        });
+        </script>
         """
     )
 
@@ -214,6 +379,7 @@ async def setup_ui():
 
             # Create containers for each shelf that we can update
             shelves_ui = {}
+            _shelves_ui_ref = shelves_ui  # Store globally for drag-drop handler
             for shelf in sorted_shelves:
                 shelf_subentries = subentries_by_shelf[shelf]
                 container = ui.column().classes("w-full gap-2")

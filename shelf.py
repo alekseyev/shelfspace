@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from beanie import init_beanie
 import typer
 
@@ -50,9 +52,9 @@ async def process_movies():
 
     # Fetch movies from watchlist and maybe list
     typer.echo("Fetching watchlist movies...")
-    watchlist_movies = api.watchlist_movies()
+    watchlist_movies = api.get_movies()
     typer.echo("Fetching maybe list movies...")
-    maybe_movies = api.list_movies("maybe")
+    maybe_movies = api.get_movies("maybe")
 
     # Combine and deduplicate by trakt_id
     movies_by_id = {m["trakt_id"]: m for m in watchlist_movies}
@@ -65,20 +67,27 @@ async def process_movies():
     for movie in movies_by_id.values():
         if await Entry.find_one(Entry.metadata["trakt_id"] == movie["trakt_id"]):
             continue
+
+        # Fetch full movie details only when adding to database
+        movie_data = api.get_movie_data(movie["trakt_id"])
+        release_date = None
+        if movie_data["release_date"]:
+            release_date = datetime.fromisoformat(movie_data["release_date"])
+
         entry = Entry(
             type=MediaType.MOVIE.value,
             name=movie["name"],
             subentries=[
                 SubEntry(
                     shelf="Icebox",
-                    estimated=movie["estimated"],
-                    release_date=movie["release_date"],
+                    estimated=movie_data["runtime"],
+                    release_date=release_date,
                 )
             ],
-            release_date=movie["release_date"],
+            release_date=release_date,
             metadata={"trakt_id": movie["trakt_id"]},
             links=[f"https://trakt.tv/movies/{movie['slug']}"],
-            rating=movie["rating"],
+            rating=int(movie_data["rating"]) if movie_data["rating"] else None,
         )
         typer.echo(f"Adding {entry.name} to Icebox")
         await entry.save()

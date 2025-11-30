@@ -140,39 +140,26 @@ class TraktAPI(BaseAPI):
 
         return results
 
-    def watchlist_movies(self) -> list[dict]:
-        data = self._get("/users/me/watchlist")
-        return self._parse_movies(data)
+    def get_movies(self, list_slug: str | None = None) -> list[dict]:
+        """Fetch movies from a list or watchlist.
 
-    def list_movies(self, list_slug: str) -> list[dict]:
-        """Fetch movies from a custom list by slug."""
-        data = self._get(f"/users/me/lists/{list_slug}/items")
-        return self._parse_movies(data)
+        Args:
+            list_slug: Custom list slug. If None, fetches from watchlist.
+        """
+        if list_slug:
+            data = self._get(f"/users/me/lists/{list_slug}/items")
+        else:
+            data = self._get("/users/me/watchlist")
 
-    def _parse_movies(self, data: list[dict]) -> list[dict]:
-        """Parse movie data from a list of items."""
         results = []
         for item in data:
             if item["type"] != "movie":
                 continue
 
-            item_id = item["movie"]["ids"]["trakt"]
-            movie_data = self.get_movie_data(item_id)
-            if movie_data["release_date"]:
-                release_date = datetime.fromisoformat(movie_data["release_date"])
-            else:
-                release_date = None
-
             results.append(
                 dict(
                     name=item["movie"]["title"],
-                    estimated=int(movie_data["runtime"])
-                    if movie_data["runtime"]
-                    else None,
-                    spent=None,
-                    release_date=release_date,
-                    rating=int(movie_data["rating"]),
-                    trakt_id=item_id,
+                    trakt_id=item["movie"]["ids"]["trakt"],
                     slug=item["movie"]["ids"]["slug"],
                 )
             )

@@ -364,6 +364,8 @@ class TraktAPI(BaseAPI):
             result.append(
                 {
                     "title": item["show"]["title"],
+                    "show_trakt_id": item["show"]["ids"]["trakt"],
+                    "show_slug": item["show"]["ids"]["slug"],
                     "first_aired": item["first_aired"],
                     "season": item["episode"]["season"],
                     "episode": item["episode"]["number"],

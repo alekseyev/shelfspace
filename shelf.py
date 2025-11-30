@@ -204,6 +204,144 @@ async def process_shows():
     save_trakt_secrets(**api._get_tokens())
 
 
+@app.async_command()
+async def process_upcoming(days: int = 49):
+    """Add upcoming episodes from Trakt calendar that aren't in DB yet.
+
+    By default, new episodes go to "Backlog" shelf.
+    If the show has older episodes in "Icebox", new episodes go to "Icebox" instead.
+    """
+    await init_db()
+    typer.echo("Fetching upcoming episodes from Trakt...")
+    secrets = get_trakt_secrets()
+    api = TraktAPI(**secrets)
+
+    upcoming = api.get_upcoming_episodes(days)
+    typer.echo(f"Found {len(upcoming)} upcoming episodes")
+
+    # Group episodes by show+season for efficient processing
+    episodes_by_season: dict[str, list[dict]] = {}
+    for ep in upcoming:
+        season_key = f"{ep['show_trakt_id']}_s{ep['season']}"
+        if season_key not in episodes_by_season:
+            episodes_by_season[season_key] = {
+                "show_title": ep["title"],
+                "show_trakt_id": ep["show_trakt_id"],
+                "show_slug": ep["show_slug"],
+                "season": ep["season"],
+                "episodes": [],
+            }
+        episodes_by_season[season_key]["episodes"].append(ep)
+
+    added_count = 0
+    for season_key, season_data in episodes_by_season.items():
+        show_trakt_id = season_data["show_trakt_id"]
+        season_number = season_data["season"]
+        show_title = season_data["show_title"]
+        show_slug = season_data["show_slug"]
+
+        # Check if entry for this season exists
+        existing_entry = await Entry.find_one(Entry.metadata["trakt_id"] == season_key)
+
+        if existing_entry:
+            # Check if any existing subentry is in Icebox
+            has_icebox = any(sub.shelf == "Icebox" for sub in existing_entry.subentries)
+            default_shelf = "Icebox" if has_icebox else "Backlog"
+
+            # Find existing episode numbers
+            existing_ep_names = {sub.name for sub in existing_entry.subentries}
+
+            # Add missing episodes
+            entry_added_count = 0
+            for ep in season_data["episodes"]:
+                ep_name = f"S{season_number:02d}E{ep['episode']:02d}"
+                if ep_name in existing_ep_names:
+                    continue
+
+                release_date = None
+                if ep["first_aired"]:
+                    aired_dt = datetime.fromisoformat(
+                        ep["first_aired"].replace("Z", "+00:00")
+                    )
+                    release_date = aired_dt.date()
+
+                new_subentry = SubEntry(
+                    shelf=default_shelf,
+                    name=ep_name,
+                    estimated=ep["runtime"],
+                    release_date=release_date,
+                )
+                existing_entry.subentries.append(new_subentry)
+                typer.echo(f"Adding {show_title} {ep_name} to {default_shelf}")
+                entry_added_count += 1
+                added_count += 1
+
+            if entry_added_count > 0:
+                await existing_entry.save()
+        else:
+            # Entry doesn't exist - check if show has ANY season in Icebox
+            any_icebox_entry = await Entry.find_one(
+                {
+                    "metadata.show_trakt_id": show_trakt_id,
+                    "subentries.shelf": "Icebox",
+                }
+            )
+            default_shelf = "Icebox" if any_icebox_entry else "Backlog"
+
+            # Get season summary to determine if multi-season
+            seasons_summary = api.get_seasons_summary(show_trakt_id)
+            valid_seasons = [s for s in seasons_summary if s["number"]]
+            is_multi_season = len(valid_seasons) > 1
+
+            entry_name = (
+                f"{show_title} S{season_number}" if is_multi_season else show_title
+            )
+
+            # Build subentries for the upcoming episodes
+            subentries = []
+            for ep in season_data["episodes"]:
+                ep_name = f"S{season_number:02d}E{ep['episode']:02d}"
+                release_date = None
+                if ep["first_aired"]:
+                    aired_dt = datetime.fromisoformat(
+                        ep["first_aired"].replace("Z", "+00:00")
+                    )
+                    release_date = aired_dt.date()
+
+                subentries.append(
+                    SubEntry(
+                        shelf=default_shelf,
+                        name=ep_name,
+                        estimated=ep["runtime"],
+                        release_date=release_date,
+                    )
+                )
+
+            # Get first episode's release date for the entry
+            entry_release_date = subentries[0].release_date if subentries else None
+
+            entry = Entry(
+                type=MediaType.SERIES.value,
+                name=entry_name,
+                subentries=subentries,
+                release_date=entry_release_date,
+                metadata={
+                    "trakt_id": season_key,
+                    "show_trakt_id": show_trakt_id,
+                },
+                links=[f"https://trakt.tv/shows/{show_slug}/seasons/{season_number}"],
+            )
+            typer.echo(
+                f"Adding {entry_name} ({len(subentries)} episodes) to {default_shelf}"
+            )
+            await entry.save()
+            added_count += len(subentries)
+
+    typer.echo(f"Added {added_count} new episodes")
+    # Save tokens (in case they were refreshed during API calls)
+    save_trakt_secrets(**api._get_tokens())
+
+
 def get_emoji_for_type(media_type):
     """Get emoji representation for media type."""
     emoji_map = {

@@ -47,8 +47,22 @@ async def process_movies():
     typer.echo("Fetching Trakt data...")
     secrets = get_trakt_secrets()
     api = TraktAPI(**secrets)
-    movies = api.watchlist_movies()
-    for movie in movies:
+
+    # Fetch movies from watchlist and maybe list
+    typer.echo("Fetching watchlist movies...")
+    watchlist_movies = api.watchlist_movies()
+    typer.echo("Fetching maybe list movies...")
+    maybe_movies = api.list_movies("maybe")
+
+    # Combine and deduplicate by trakt_id
+    movies_by_id = {m["trakt_id"]: m for m in watchlist_movies}
+    for movie in maybe_movies:
+        if movie["trakt_id"] not in movies_by_id:
+            movies_by_id[movie["trakt_id"]] = movie
+
+    typer.echo(f"Found {len(movies_by_id)} unique movies")
+
+    for movie in movies_by_id.values():
         if await Entry.find_one(Entry.metadata["trakt_id"] == movie["trakt_id"]):
             continue
         entry = Entry(

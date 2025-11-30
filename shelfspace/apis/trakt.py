@@ -140,8 +140,17 @@ class TraktAPI(BaseAPI):
 
         return results
 
-    def watchlist_movies(self) -> dict:
+    def watchlist_movies(self) -> list[dict]:
         data = self._get("/users/me/watchlist")
+        return self._parse_movies(data)
+
+    def list_movies(self, list_slug: str) -> list[dict]:
+        """Fetch movies from a custom list by slug."""
+        data = self._get(f"/users/me/lists/{list_slug}/items")
+        return self._parse_movies(data)
+
+    def _parse_movies(self, data: list[dict]) -> list[dict]:
+        """Parse movie data from a list of items."""
         results = []
         for item in data:
             if item["type"] != "movie":
@@ -161,7 +170,6 @@ class TraktAPI(BaseAPI):
                     if movie_data["runtime"]
                     else None,
                     spent=None,
-                    status=Status.FUTURE,
                     release_date=release_date,
                     rating=int(movie_data["rating"]),
                     trakt_id=item_id,

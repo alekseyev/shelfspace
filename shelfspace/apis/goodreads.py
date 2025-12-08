@@ -21,7 +21,7 @@ def get_shelf_position(shelf_string: str, shelf: str) -> int:
         return INF * 2
 
 
-def get_books_from_csv(filename: str) -> list[LegacyEntry]:
+def get_books_from_csv_legacy(filename: str) -> list[LegacyEntry]:
     result = []
     with open(filename) as f:
         reader = csv.DictReader(f)
@@ -76,3 +76,51 @@ def get_books_from_csv(filename: str) -> list[LegacyEntry]:
     result.sort(key=lambda x: x[0])
 
     return [book for _, book in result]
+
+
+def get_books_from_csv(filename: str) -> list[dict]:
+    result = []
+    with open(filename) as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            shelf_string = row["Bookshelves with positions"]
+            if row["Exclusive Shelf"] != "to-read":
+                continue
+            index = get_shelf_position(shelf_string, "to-read")
+
+            book_type = (
+                MediaType.BOOK_ED
+                if "want-to-read-tech" in row["Bookshelves"]
+                else MediaType.BOOK
+            )
+            estimated = None
+            is_audio = "audio" in row["Binding"].lower()
+
+            if not is_audio and (pages := row["Number of Pages"]):
+                publisher = row["Publisher"].lower()
+                is_comics = any(
+                    substring in publisher for substring in COMICS_PUBLISHERS_SUBSTRINGS
+                )
+                pages = int(pages)
+                if is_comics:
+                    estimated = estimate_comic_book_from_pages(pages)
+                    book_type = MediaType.BOOK_COM
+                elif book_type == MediaType.BOOK_ED:
+                    estimated = estimate_ed_book_from_pages(pages)
+                else:
+                    estimated = estimate_book_from_pages(pages)
+
+            result.append(
+                dict(
+                    type=book_type,
+                    name=f"{row['Author']} - {row['Title']}",
+                    est=estimated,
+                    rating=int(float(row["Average Rating"]) * 20),
+                    year=row["Original Publication Year"],
+                    index=index,
+                    goodreads_id=row["Book Id"],
+                ),
+            )
+
+    result.sort(key=lambda x: x["index"])
+    return result

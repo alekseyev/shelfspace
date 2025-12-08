@@ -2,7 +2,7 @@ import logging
 
 import typer
 
-from shelfspace.apis.goodreads import get_books_from_csv
+from shelfspace.apis.goodreads import get_books_from_csv_legacy
 from shelfspace.apis.hltb import HowlongAPI
 from shelfspace.apis.notion import NotionAPI
 from shelfspace.apis.secrets import get_trakt_secrets, save_trakt_secrets
@@ -18,7 +18,7 @@ app = typer.Typer()
 
 @app.command()
 def list_books(filename: str):
-    books = get_books_from_csv(filename)
+    books = get_books_from_csv_legacy(filename)
     for book in books:
         typer.echo(f"{book.name} - {book.estimated}h")
 
@@ -52,7 +52,7 @@ def add_new_entries_to_notion(entries: dict[str, LegacyEntry], auto: bool = Fals
 @app.command()
 @cached()
 def process_books_csv(filename: str):
-    books_in_csv = {book.name: book for book in get_books_from_csv(filename)}
+    books_in_csv = {book.name: book for book in get_books_from_csv_legacy(filename)}
     add_new_entries_to_notion(books_in_csv)
 
 

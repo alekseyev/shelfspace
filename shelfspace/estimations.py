@@ -1,22 +1,22 @@
-def estimation_from_minutes(val: int) -> float:
-    """Round UP to 6 minutes, convert to hours"""
+def estimation_from_minutes(val: int) -> int:
+    """Round UP to 6 minutes"""
     val += 6 - (val % 6)
-    return val / 60
+    return val
 
 
-def estimate_book_from_pages(pages: int) -> float:
+def estimate_book_from_pages(pages: int) -> int:
     return estimation_from_minutes(int(pages * 1.4))
 
 
-def estimate_ed_book_from_pages(pages: int) -> float:
-    return estimation_from_minutes(int(pages * 2))
+def estimate_ed_book_from_pages(pages: int) -> int:
+    return estimation_from_minutes(int(pages * 1.8))
 
 
-def estimate_comic_book_from_pages(pages: int) -> float:
-    return estimation_from_minutes(int(pages * 1.5))
+def estimate_comic_book_from_pages(pages: int) -> int:
+    return estimation_from_minutes(int(pages * 1.2))
 
 
-def estimate_from_hltb(seconds: int) -> float:
+def estimate_from_hltb(seconds: int) -> int:
     return estimation_from_minutes(seconds * 1.1 // 60)
 
 

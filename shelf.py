@@ -3,6 +3,7 @@ from datetime import datetime
 from beanie import init_beanie
 import typer
 
+from shelfspace.apis.goodreads import get_books_from_csv
 from shelfspace.apis.secrets import get_trakt_secrets, save_trakt_secrets
 from shelfspace.apis.trakt import TraktAPI
 from shelfspace.models import Entry, MediaType, SubEntry
@@ -417,6 +418,35 @@ async def list_entries():
                         format_minutes(sub.estimated) if sub.estimated else "N/A"
                     )
                     typer.echo(f"      └─ {sub_name}: {sub_estimated}")
+
+
+@app.async_command()
+async def process_books_csv(filename: str):
+    await init_db()
+
+    books = get_books_from_csv(filename)
+    for book in books:
+        if await Entry.find_one(Entry.metadata["goodreads_id"] == book["goodreads_id"]):
+            continue
+
+        shelf = "Icebox"
+        if book["index"] < 35:
+            shelf = "Backlog"
+        entry = Entry(
+            type=book["type"],
+            name=book["name"],
+            subentries=[
+                SubEntry(
+                    shelf=shelf,
+                    estimated=book["est"],
+                )
+            ],
+            metadata={"goodreads_id": book["goodreads_id"]},
+            links=[f"https://www.goodreads.com/book/show/{book['goodreads_id']}"],
+            rating=book["rating"],
+        )
+        typer.echo(f"Adding {book['name']} to {shelf}")
+        await entry.save()
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ install: ## Install packages from requirements.txt
 	test -d .venv || uv venv --python $(cat .python-version)
 	. .venv/bin/activate
 	uv sync
+	playwright install
 
 format: ## Format with ruff
 	ruff format .

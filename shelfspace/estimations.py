@@ -1,6 +1,6 @@
 def estimation_from_minutes(val: int) -> int:
     """Round UP to 6 minutes"""
-    val += 6 - (val % 6)
+    val += 10 - (val % 10)
     return val
 
 
@@ -18,6 +18,10 @@ def estimate_comic_book_from_pages(pages: int) -> int:
 
 def estimate_from_hltb(seconds: int) -> int:
     return estimation_from_minutes(seconds * 1.1 // 60)
+
+
+def round_up_game_estimate(minutes: int) -> int:
+    return estimation_from_minutes(int(minutes * 1.1))
 
 
 def estimate_episode(val: int) -> int:

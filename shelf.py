@@ -4,8 +4,10 @@ from beanie import init_beanie
 import typer
 
 from shelfspace.apis.goodreads import get_books_from_csv
+from shelfspace.apis.hltb import HowlongAPI
 from shelfspace.apis.secrets import get_trakt_secrets, save_trakt_secrets
 from shelfspace.apis.trakt import TraktAPI
+from shelfspace.estimations import round_up_game_estimate
 from shelfspace.models import Entry, MediaType, SubEntry
 from shelfspace.utils import format_minutes
 from shelfspace.settings import settings
@@ -446,6 +448,48 @@ async def process_books_csv(filename: str):
             rating=book["rating"],
         )
         typer.echo(f"Adding {book['name']} to {shelf}")
+        await entry.save()
+
+
+@app.async_command()
+async def process_games():
+    await init_db()
+    typer.echo("Fetching HLTB data...")
+    api = HowlongAPI()
+    games = await api.get_backlog()
+    typer.echo(f"Found {len(games)} games")
+    for game in games:
+        if await Entry.find_one(Entry.metadata["hltb_id"] == game["hltb_id"]):
+            continue
+
+        game_data = await api.get_game_data(game["hltb_id"])
+        shelf = "Icebox"
+
+        game_type = MediaType.GAME
+        if game["platform"] == "Mobile":
+            game_type = MediaType.GAME_MOBILE
+        elif game["platform"] in ("PC VR", "Meta Quest"):
+            game_type = MediaType.GAME_VR
+
+        entry = Entry(
+            type=game_type.value,
+            name=game["title"],
+            subentries=[
+                SubEntry(
+                    shelf=shelf,
+                    estimated=round_up_game_estimate(game_data["time_to_beat"])
+                    if game_data["time_to_beat"]
+                    else None,
+                    release_date=game_data["release_date"],
+                )
+            ],
+            release_date=game_data["release_date"],
+            metadata={"hltb_id": game["hltb_id"]},
+            rating=game_data["rating"],
+            links=[game["url"]] + game_data["steam_links"],
+        )
+
+        typer.echo(f"Adding {entry.name} ({entry.type}) to {shelf}")
         await entry.save()
 
 

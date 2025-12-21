@@ -2,7 +2,7 @@ import logging
 
 import typer
 
-from shelfspace.apis.goodreads import get_books_from_csv_legacy
+from shelfspace.apis.goodreads_old import get_books_from_csv_legacy
 from shelfspace.apis.hltb import HowlongAPI
 from shelfspace.apis.notion import NotionAPI
 from shelfspace.apis.secrets import get_trakt_secrets, save_trakt_secrets

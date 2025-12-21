@@ -1,126 +1,163 @@
-import csv
 import re
-
-from shelfspace.models import LegacyEntry, MediaType, Status
-from shelfspace.estimations import (
-    estimate_book_from_pages,
-    estimate_comic_book_from_pages,
-    estimate_ed_book_from_pages,
-)
-
-COMICS_PUBLISHERS_SUBSTRINGS = ["comix", "comic", "vovkulaka"]
-
-INF = 1000000
+from shelfspace.browser import playwright_page
+from shelfspace.settings import settings
+from shelfspace.utils import parse_date
 
 
-def get_shelf_position(shelf_string: str, shelf: str) -> int:
-    match = re.search(shelf + r" \(#(\d+)\)", shelf_string)
-    if match:
-        return int(match.group(1))
-    else:
-        return INF * 2
+class GoodreadsAPI:
+    base_url = "https://www.goodreads.com"
+    user = settings.GOODREADS_USER
 
+    async def get_to_read(self):
+        books = []
 
-def get_books_from_csv_legacy(filename: str) -> list[LegacyEntry]:
-    result = []
-    with open(filename) as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            shelf_string = row["Bookshelves with positions"]
-            status = Status.CURRENT
-            if row["Exclusive Shelf"] == "read":
-                status = Status.DONE
-                index = INF + get_shelf_position(shelf_string, "read")
-            elif row["Exclusive Shelf"] == "to-read":
-                status = Status.FUTURE
-                index = 10 + get_shelf_position(shelf_string, "to-read")
-            else:
-                index = get_shelf_position(shelf_string, "reading")
-
-            book_type = (
-                MediaType.BOOK_ED
-                if "want-to-read-tech" in row["Bookshelves"]
-                else MediaType.BOOK
-            )
-            estimated = None
-            is_audio = "audio" in row["Binding"].lower()
-
-            if not is_audio and (pages := row["Number of Pages"]):
-                publisher = row["Publisher"].lower()
-                is_comics = any(
-                    substring in publisher for substring in COMICS_PUBLISHERS_SUBSTRINGS
+        async with playwright_page() as page:
+            url = f"{self.base_url}/review/list/{self.user}?shelf=to-read&sort=position"
+            while url:
+                await page.goto(
+                    url,
+                    wait_until="domcontentloaded",
                 )
-                pages = int(pages)
-                if is_comics:
-                    estimated = estimate_comic_book_from_pages(pages)
-                    book_type = MediaType.BOOK_COM
-                elif book_type == MediaType.BOOK_ED:
-                    estimated = estimate_ed_book_from_pages(pages)
-                else:
-                    estimated = estimate_book_from_pages(pages)
+                await page.wait_for_selector("#booksBody", timeout=5000)
+                rows = await page.query_selector_all("#booksBody tr")
 
-            result.append(
-                (
-                    index,
-                    LegacyEntry(
-                        type=book_type,
-                        name=f"{row['Author']} - {row['Title']}",
-                        status=status,
-                        estimated=estimated,
-                        spent=estimated if status == Status.DONE else None,
-                        notes=f"GR: {row['Average Rating']} / 5",
-                    ),
+                for row in rows:
+                    # --- Position ---
+                    pos_el = await row.query_selector("td.field.position div.value")
+                    position = (
+                        int((await pos_el.inner_text()).strip()) if pos_el else None
+                    )
+
+                    # --- Title ---
+                    title_el = await row.query_selector("td.field.title div.value a")
+                    title = (await title_el.inner_text()).strip() if title_el else None
+
+                    # --- Book ID & URL ---
+                    href = await title_el.get_attribute("href") if title_el else None
+                    book_id = None
+                    if href:
+                        m = re.search(r"/book/show/(\d+)", href)
+                        if m:
+                            book_id = int(m.group(1))
+
+                    # --- Rating ---
+                    rating = None
+                    rating_el = await row.query_selector(
+                        "td.field.avg_rating div.value"
+                    )
+                    if rating_el:
+                        rating_text = (await rating_el.inner_text()).strip()
+                        try:
+                            rating = float(rating_text)
+                        except ValueError:
+                            pass
+
+                    if book_id:
+                        books.append(
+                            {
+                                "title": title,
+                                "goodreads_id": book_id,
+                                "url": f"{self.base_url}{href}" if href else None,
+                                "position": position,
+                                "rating": rating,
+                            }
+                        )
+
+                # Check for next page
+                url = None
+                next_el = await page.query_selector("a.next_page")
+                if next_el:
+                    next_href = await next_el.get_attribute("href")
+                    if next_href:
+                        url = f"{self.base_url}{next_href}"
+
+        return books
+
+    async def get_book_data(self, goodreads_id: int) -> dict:
+        async with playwright_page() as page:
+            await page.goto(
+                f"{self.base_url}/book/show/{goodreads_id}",
+                wait_until="domcontentloaded",
+            )
+
+            # --- Title ---
+            title_el = await page.query_selector("#bookTitle")
+            title = (await title_el.inner_text()).strip() if title_el else None
+
+            # --- Authors ---
+            authors = []
+
+            contributors = await page.query_selector_all(
+                "div.ContributorLinksList a.ContributorLink"
+            )
+
+            for contributor in contributors:
+                role_el = await contributor.query_selector("span[data-testid='role']")
+                role = (
+                    (await role_el.inner_text()).strip().strip("()")
+                    if role_el
+                    else None
                 )
+                if role and role.lower() not in ("author", "writer"):
+                    continue
+
+                name_el = await contributor.query_selector("span[data-testid='name']")
+                if not name_el:
+                    continue
+
+                name = (await name_el.inner_text()).strip()
+                if name:
+                    authors.append(name)
+
+            # --- Page count ---
+            page_count = None
+            pages_el = await page.query_selector(
+                "div.FeaturedDetails p[data-testid='pagesFormat']"
             )
+            if pages_el:
+                text = await pages_el.inner_text()  # e.g. "200 pages, Paperback"
+                text = " ".join(text.split())  # normalize whitespace
+                m = re.search(r"(\d+)\s+pages?", text)
+                if m:
+                    page_count = int(m.group(1))
 
-    result.sort(key=lambda x: x[0])
-
-    return [book for _, book in result]
-
-
-def get_books_from_csv(filename: str) -> list[dict]:
-    result = []
-    with open(filename) as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            shelf_string = row["Bookshelves with positions"]
-            if row["Exclusive Shelf"] != "to-read":
-                continue
-            index = get_shelf_position(shelf_string, "to-read")
-
-            book_type = (
-                MediaType.BOOK_ED
-                if "want-to-read-tech" in row["Bookshelves"]
-                else MediaType.BOOK
+            # --- Publication date ---
+            publication_date = None
+            pub_el = await page.query_selector(
+                "div.FeaturedDetails p[data-testid='publicationInfo']"
             )
-            estimated = None
-            is_audio = "audio" in row["Binding"].lower()
-
-            if not is_audio and (pages := row["Number of Pages"]):
-                publisher = row["Publisher"].lower()
-                is_comics = any(
-                    substring in publisher for substring in COMICS_PUBLISHERS_SUBSTRINGS
+            if pub_el:
+                text = (
+                    await pub_el.inner_text()
+                ).strip()  # e.g. "First published March 1, 2022"
+                m = re.search(
+                    r"(?:First\s+published|Published)\s+(.+)$", text, re.IGNORECASE
                 )
-                pages = int(pages)
-                if is_comics:
-                    estimated = estimate_comic_book_from_pages(pages)
-                    book_type = MediaType.BOOK_COM
-                elif book_type == MediaType.BOOK_ED:
-                    estimated = estimate_ed_book_from_pages(pages)
-                else:
-                    estimated = estimate_book_from_pages(pages)
+                if m:
+                    publication_date = m.group(1).strip()
 
-            result.append(
-                dict(
-                    type=book_type,
-                    name=f"{row['Author']} - {row['Title']}",
-                    est=estimated,
-                    rating=int(float(row["Average Rating"]) * 20),
-                    year=row["Original Publication Year"],
-                    index=index,
-                    goodreads_id=row["Book Id"],
-                ),
+            # --- Genres ---
+            genres = []
+
+            genre_els = await page.query_selector_all(
+                "ul.CollapsableList a.Button--tag span.Button__labelItem"
             )
 
-    result.sort(key=lambda x: x["index"])
-    return result
+            for el in genre_els:
+                genre = (await el.inner_text()).strip()
+                if genre:
+                    genres.append(genre.lower())
+
+            return {
+                "title": title,
+                "author": ", ".join(authors),
+                "page_count": page_count,
+                "publication_date": parse_date(publication_date)
+                if publication_date
+                else None,
+                "is_comics": "comics" in genres
+                or "graphic novels" in genres
+                or "manga" in genres,
+                "is_educational": "programming" in genres
+                or "computer science" in genres,
+            }

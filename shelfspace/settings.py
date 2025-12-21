@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     TRAKT_CLIENT_SECRET: str = ""
 
     HLTB_USER: str = ""
+    GOODREADS_USER: str = ""
 
 
 settings = Settings()

@@ -13,7 +13,7 @@ def estimate_ed_book_from_pages(pages: int) -> int:
 
 
 def estimate_comic_book_from_pages(pages: int) -> int:
-    return estimation_from_minutes(int(pages * 1.2))
+    return estimation_from_minutes(int(pages * 0.9))
 
 
 def estimate_from_hltb(seconds: int) -> int:

@@ -3,11 +3,16 @@ from datetime import datetime
 from beanie import init_beanie
 import typer
 
-from shelfspace.apis.goodreads import get_books_from_csv
+from shelfspace.apis.goodreads import GoodreadsAPI
 from shelfspace.apis.hltb import HowlongAPI
 from shelfspace.apis.secrets import get_trakt_secrets, save_trakt_secrets
 from shelfspace.apis.trakt import TraktAPI
-from shelfspace.estimations import round_up_game_estimate
+from shelfspace.estimations import (
+    estimate_book_from_pages,
+    estimate_comic_book_from_pages,
+    estimate_ed_book_from_pages,
+    round_up_game_estimate,
+)
 from shelfspace.models import Entry, MediaType, SubEntry
 from shelfspace.utils import format_minutes
 from shelfspace.settings import settings
@@ -423,35 +428,6 @@ async def list_entries():
 
 
 @app.async_command()
-async def process_books_csv(filename: str):
-    await init_db()
-
-    books = get_books_from_csv(filename)
-    for book in books:
-        if await Entry.find_one(Entry.metadata["goodreads_id"] == book["goodreads_id"]):
-            continue
-
-        shelf = "Icebox"
-        if book["index"] < 35:
-            shelf = "Backlog"
-        entry = Entry(
-            type=book["type"],
-            name=book["name"],
-            subentries=[
-                SubEntry(
-                    shelf=shelf,
-                    estimated=book["est"],
-                )
-            ],
-            metadata={"goodreads_id": book["goodreads_id"]},
-            links=[f"https://www.goodreads.com/book/show/{book['goodreads_id']}"],
-            rating=book["rating"],
-        )
-        typer.echo(f"Adding {book['name']} to {shelf}")
-        await entry.save()
-
-
-@app.async_command()
 async def process_games():
     await init_db()
     typer.echo("Fetching HLTB data...")
@@ -489,7 +465,50 @@ async def process_games():
             links=[game["url"]] + game_data["steam_links"],
         )
 
-        typer.echo(f"Adding {entry.name} ({entry.type}) to {shelf}")
+        typer.echo(f"Adding {entry.name} ({entry.type.value}) to {shelf}")
+        await entry.save()
+
+
+@app.async_command()
+async def process_books():
+    await init_db()
+    typer.echo("Fetching Goodreads data...")
+    api = GoodreadsAPI()
+    books = await api.get_to_read()
+    for book in books:
+        if await Entry.find_one(Entry.metadata["goodreads_id"] == book["goodreads_id"]):
+            continue
+
+        book_data = await api.get_book_data(book["goodreads_id"])
+        media_type = MediaType.BOOK
+        pages = book_data.get("page_count", 0)
+        estimated = estimate_book_from_pages(pages) if pages else None
+        if book_data.get("is_comics"):
+            media_type = MediaType.BOOK_COM
+            estimated = estimate_comic_book_from_pages(pages) if pages else None
+        elif book_data.get("is_educational"):
+            media_type = MediaType.BOOK_ED
+            estimated = estimate_ed_book_from_pages(pages) if pages else None
+
+        shelf = "Icebox"
+        if book["position"] < 35:
+            shelf = "Backlog"
+        entry = Entry(
+            type=media_type.value,
+            name=f"{book_data['author']} - {book['title']}",
+            subentries=[
+                SubEntry(
+                    shelf=shelf,
+                    estimated=estimated,
+                    release_date=book_data.get("publication_date"),
+                )
+            ],
+            release_date=book_data.get("publication_date"),
+            metadata={"goodreads_id": book["goodreads_id"]},
+            links=[f"https://www.goodreads.com/book/show/{book['goodreads_id']}"],
+            rating=int(book["rating"] * 20) if book["rating"] else None,
+        )
+        typer.echo(f"Adding {get_emoji_for_type(entry.type)} {entry.name} to {shelf}")
         await entry.save()
 
 

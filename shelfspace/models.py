@@ -50,12 +50,39 @@ class LegacyEntry(BaseModel):
 
 
 class Shelf(Document):
-    name: str
+    name: str = ""
     start_date: date | None = None
     end_date: date | None = None
     description: str = ""
+    is_finished: bool = False
+    weight: int = 1
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    async def get_shelves_dict() -> dict[str, "Shelf"]:
+        shelves = await Shelf.find(Shelf.is_finished == False).to_list()  # noqa: E712
+        return {shelf.name: shelf for shelf in shelves}
+
+    def generate_name(self) -> str:
+        if self.start_date and self.end_date:
+            return f"{self.start_date.strftime('%d %B')} - {self.end_date.strftime('%d %B %Y')}"
+        return self.name
+
+    async def save(self) -> None:
+        self.updated_at = datetime.utcnow()
+        if self.start_date and self.end_date:
+            self.name = self.generate_name()
+            self.weight = self.start_date.toordinal()
+        elif self.name == "Upcoming":
+            self.weight = 1000000
+        elif self.name == "Backlog":
+            self.weight = 2000000
+        elif self.name == "Icebox":
+            self.weight = 3000000
+        await super().save()
+
+    def __str__(self) -> str:
+        return f"Shelf {self.name}{' (finished)' if self.is_finished else ''}"
 
 
 class SubEntry(BaseModel):

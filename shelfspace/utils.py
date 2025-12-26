@@ -14,11 +14,11 @@ def format_minutes(minutes: int | None) -> str:
     Returns:
         Formatted string in the format "Xh Ym" (e.g., "2h 5m").
     """
-    if not minutes:
+    if minutes is None:
         return "N/A"
     hours = minutes // 60
     mins = minutes % 60
-    return f"{hours}h {mins}m"
+    return f"{hours}h{mins}m"
 
 
 MONTHS = {

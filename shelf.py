@@ -14,6 +14,7 @@ from shelfspace.estimations import (
     round_up_game_estimate,
 )
 from shelfspace.models import Entry, MediaType, Shelf, SubEntry
+from shelfspace.models import get_emoji_for_type
 from shelfspace.utils import format_minutes
 from shelfspace.settings import settings
 
@@ -350,30 +351,11 @@ async def process_upcoming(days: int = 49):
     save_trakt_secrets(**api._get_tokens())
 
 
-def get_emoji_for_type(media_type):
-    """Get emoji representation for media type."""
-    emoji_map = {
-        "Projects": "🏗️",
-        "Duolingo": "🗣️",
-        "Course": "📚",
-        "Movie": "🎬",
-        "Series": "📺",
-        "Game": "🎮",
-        "Game (VR)": "🥽",
-        "Game (mobile)": "📱",
-        "Book": "📖",
-        "Book (educational)": "📚",
-        "Book (comics)": "💭",
-        "Article": "📰",
-        "Talk/video": "🎥",
-    }
-    return emoji_map.get(media_type, "📌")
-
-
 @app.async_command()
 async def list_entries():
     await init_db()
     entries = await Entry.find().to_list()
+    await Shelf.get_shelves_dict()
 
     # Group entries by shelf (store entry with its relevant subentries for that shelf)
     entries_by_shelf: dict[str, list[tuple[Entry, list[SubEntry]]]] = {}
@@ -381,7 +363,7 @@ async def list_entries():
         # Group subentries by shelf
         subentries_by_shelf: dict[str, list[SubEntry]] = {}
         for subentry in entry.subentries:
-            shelf = subentry.shelf or "Uncategorized"
+            shelf = subentry.shelf_name
             if shelf not in subentries_by_shelf:
                 subentries_by_shelf[shelf] = []
             subentries_by_shelf[shelf].append(subentry)

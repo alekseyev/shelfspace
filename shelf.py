@@ -55,6 +55,8 @@ async def add_new_entries(entries: list[Entry]):
 @app.async_command()
 async def process_movies():
     await init_db()
+    icebox_shelf = await Shelf.find_one(Shelf.name == "Icebox")
+
     typer.echo("Fetching Trakt data...")
     secrets = get_trakt_secrets()
     api = TraktAPI(**secrets)
@@ -88,7 +90,7 @@ async def process_movies():
             name=movie["name"],
             subentries=[
                 SubEntry(
-                    shelf="Icebox",
+                    shelf_id=icebox_shelf.id,
                     estimated=movie_data["runtime"],
                     release_date=release_date,
                 )
@@ -108,6 +110,8 @@ async def process_movies():
 @app.async_command()
 async def process_shows():
     await init_db()
+    icebox_shelf = await Shelf.find_one(Shelf.name == "Icebox")
+
     typer.echo("Fetching Trakt data...")
     secrets = get_trakt_secrets()
     api = TraktAPI(**secrets)
@@ -183,7 +187,7 @@ async def process_shows():
 
                 subentries.append(
                     SubEntry(
-                        shelf="Icebox",
+                        shelf_id=icebox_shelf.id,
                         name=ep_name,
                         estimated=episode["runtime"],
                         release_date=release_date,
@@ -221,6 +225,9 @@ async def process_upcoming(days: int = 49):
     If the show has older episodes in "Icebox", new episodes go to "Icebox" instead.
     """
     await init_db()
+    icebox_shelf = await Shelf.find_one(Shelf.name == "Icebox")
+    backlog_shelf = await Shelf.find_one(Shelf.name == "Backlog")
+
     typer.echo("Fetching upcoming episodes from Trakt...")
     secrets = get_trakt_secrets()
     api = TraktAPI(**secrets)
@@ -254,8 +261,9 @@ async def process_upcoming(days: int = 49):
 
         if existing_entry:
             # Check if any existing subentry is in Icebox
-            has_icebox = any(sub.shelf == "Icebox" for sub in existing_entry.subentries)
-            default_shelf = "Icebox" if has_icebox else "Backlog"
+            has_icebox = any(sub.shelf_id == icebox_shelf.id for sub in existing_entry.subentries)
+            default_shelf_id = icebox_shelf.id if has_icebox else backlog_shelf.id
+            default_shelf_name = "Icebox" if has_icebox else "Backlog"
 
             # Find existing episode numbers
             existing_ep_names = {sub.name for sub in existing_entry.subentries}
@@ -275,13 +283,13 @@ async def process_upcoming(days: int = 49):
                     release_date = aired_dt.date()
 
                 new_subentry = SubEntry(
-                    shelf=default_shelf,
+                    shelf_id=default_shelf_id,
                     name=ep_name,
                     estimated=ep["runtime"],
                     release_date=release_date,
                 )
                 existing_entry.subentries.append(new_subentry)
-                typer.echo(f"Adding {show_title} {ep_name} to {default_shelf}")
+                typer.echo(f"Adding {show_title} {ep_name} to {default_shelf_name}")
                 entry_added_count += 1
                 added_count += 1
 
@@ -292,10 +300,11 @@ async def process_upcoming(days: int = 49):
             any_icebox_entry = await Entry.find_one(
                 {
                     "metadata.show_trakt_id": show_trakt_id,
-                    "subentries.shelf": "Icebox",
+                    "subentries.shelf_id": icebox_shelf.id,
                 }
             )
-            default_shelf = "Icebox" if any_icebox_entry else "Backlog"
+            default_shelf_id = icebox_shelf.id if any_icebox_entry else backlog_shelf.id
+            default_shelf_name = "Icebox" if any_icebox_entry else "Backlog"
 
             # Get season summary to determine if multi-season
             seasons_summary = api.get_seasons_summary(show_trakt_id)
@@ -319,7 +328,7 @@ async def process_upcoming(days: int = 49):
 
                 subentries.append(
                     SubEntry(
-                        shelf=default_shelf,
+                        shelf_id=default_shelf_id,
                         name=ep_name,
                         estimated=ep["runtime"],
                         release_date=release_date,
@@ -341,7 +350,7 @@ async def process_upcoming(days: int = 49):
                 links=[f"https://trakt.tv/shows/{show_slug}/seasons/{season_number}"],
             )
             typer.echo(
-                f"Adding {entry_name} ({len(subentries)} episodes) to {default_shelf}"
+                f"Adding {entry_name} ({len(subentries)} episodes) to {default_shelf_name}"
             )
             await entry.save()
             added_count += len(subentries)
@@ -412,6 +421,8 @@ async def list_entries():
 @app.async_command()
 async def process_games():
     await init_db()
+    icebox_shelf = await Shelf.find_one(Shelf.name == "Icebox")
+
     typer.echo("Fetching HLTB data...")
     api = HowlongAPI()
     games = await api.get_backlog()
@@ -421,7 +432,6 @@ async def process_games():
             continue
 
         game_data = await api.get_game_data(game["hltb_id"])
-        shelf = "Icebox"
 
         game_type = MediaType.GAME
         if game["platform"] == "Mobile":
@@ -434,7 +444,7 @@ async def process_games():
             name=game["title"],
             subentries=[
                 SubEntry(
-                    shelf=shelf,
+                    shelf_id=icebox_shelf.id,
                     estimated=round_up_game_estimate(game_data["time_to_beat"])
                     if game_data["time_to_beat"]
                     else None,
@@ -447,13 +457,16 @@ async def process_games():
             links=[game["url"]] + game_data["steam_links"],
         )
 
-        typer.echo(f"Adding {entry.name} ({entry.type.value}) to {shelf}")
+        typer.echo(f"Adding {entry.name} ({entry.type.value}) to Icebox")
         await entry.save()
 
 
 @app.async_command()
 async def process_books():
     await init_db()
+    icebox_shelf = await Shelf.find_one(Shelf.name == "Icebox")
+    backlog_shelf = await Shelf.find_one(Shelf.name == "Backlog")
+
     typer.echo("Fetching Goodreads data...")
     api = GoodreadsAPI()
     books = await api.get_to_read()
@@ -472,15 +485,18 @@ async def process_books():
             media_type = MediaType.BOOK_ED
             estimated = estimate_ed_book_from_pages(pages) if pages else None
 
-        shelf = "Icebox"
+        shelf_id = icebox_shelf.id
+        shelf_name = "Icebox"
         if book["position"] < 35:
-            shelf = "Backlog"
+            shelf_id = backlog_shelf.id
+            shelf_name = "Backlog"
+
         entry = Entry(
             type=media_type.value,
             name=f"{book_data['author']} - {book['title']}",
             subentries=[
                 SubEntry(
-                    shelf=shelf,
+                    shelf_id=shelf_id,
                     estimated=estimated,
                     release_date=book_data.get("publication_date"),
                 )
@@ -490,7 +506,7 @@ async def process_books():
             links=[f"https://www.goodreads.com/book/show/{book['goodreads_id']}"],
             rating=int(book["rating"] * 20) if book["rating"] else None,
         )
-        typer.echo(f"Adding {get_emoji_for_type(entry.type)} {entry.name} to {shelf}")
+        typer.echo(f"Adding {get_emoji_for_type(entry.type)} {entry.name} to {shelf_name}")
         await entry.save()
 
 

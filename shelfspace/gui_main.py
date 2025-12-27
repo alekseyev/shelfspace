@@ -3,7 +3,7 @@ from nicegui import app, ui
 from nicegui.events import ValueChangeEventArguments
 
 from shelfspace.app_ctx import AppCtx
-from shelfspace.models import Entry, SubEntry
+from shelfspace.models import Entry, Shelf, SubEntry
 from shelfspace.utils import format_minutes
 
 
@@ -13,6 +13,10 @@ DEFAULT_SHELF = "Icebox"
 
 # Global reference to shelves_ui for drag-drop handling
 _shelves_ui_ref: dict = {}
+
+# Global shelf objects cache
+_shelves_by_name: dict[str, Shelf] = {}
+_shelves_by_id: dict = {}
 
 
 def get_emoji_for_type(media_type):
@@ -35,23 +39,37 @@ def get_emoji_for_type(media_type):
     return emoji_map.get(media_type, "📌")
 
 
+async def load_shelves() -> None:
+    """Load shelves into global cache."""
+    global _shelves_by_name, _shelves_by_id
+    await AppCtx.ensure_initialized()
+
+    # Load shelves using the Shelf model's helper to enable shelf_name property
+    _shelves_by_id = await Shelf.get_shelves_dict()
+
+    # Also build name -> shelf mapping
+    _shelves_by_name = {
+        shelf.name: shelf for shelf in _shelves_by_id.values() if not shelf.is_finished
+    }
+
+
 async def load_subentries() -> dict[str, list[tuple[Entry, SubEntry]]]:
     """
     Load all subentries from the database grouped by shelf.
 
     Returns a dict mapping shelf names to lists of (entry, subentry) tuples.
     """
-    await AppCtx.ensure_initialized()
+    await load_shelves()
     entries = await Entry.find().to_list()
 
-    # Group subentries by shelf
+    # Group subentries by shelf name (resolved via shelf_id)
     subentries_by_shelf: dict[str, list[tuple[Entry, SubEntry]]] = {}
     for entry in entries:
         for subentry in entry.subentries:
-            shelf = subentry.shelf or DEFAULT_SHELF
-            if shelf not in subentries_by_shelf:
-                subentries_by_shelf[shelf] = []
-            subentries_by_shelf[shelf].append((entry, subentry))
+            shelf_name = subentry.shelf_name
+            if shelf_name not in subentries_by_shelf:
+                subentries_by_shelf[shelf_name] = []
+            subentries_by_shelf[shelf_name].append((entry, subentry))
 
     # Ensure required shelves are present (even if empty)
     for shelf in REQUIRED_SHELVES:
@@ -62,14 +80,20 @@ async def load_subentries() -> dict[str, list[tuple[Entry, SubEntry]]]:
 
 
 def get_all_shelves() -> list[str]:
-    """Get all possible shelf options."""
-    return sorted(REQUIRED_SHELVES)
+    """Get all possible shelf options sorted by weight."""
+    global _shelves_by_name
+    shelves = list(_shelves_by_name.values())
+    # Sort by weight (lower weight comes first)
+    shelves.sort(key=lambda s: s.weight)
+    return [shelf.name for shelf in shelves]
 
 
 async def update_subentry_shelf(
-    entry_id: str, subentry_name: str, new_shelf: str, shelves_ui: dict
+    entry_id: str, subentry_name: str, new_shelf_name: str, shelves_ui: dict
 ) -> None:
     """Update a subentry's shelf and refresh affected shelf containers."""
+    global _shelves_by_name
+
     entry_obj = await Entry.get(entry_id)
     if not entry_obj:
         return
@@ -84,18 +108,23 @@ async def update_subentry_shelf(
     if not subentry:
         return
 
-    old_shelf = subentry.shelf or DEFAULT_SHELF
-    if old_shelf == new_shelf:
+    old_shelf_name = subentry.shelf_name
+    if old_shelf_name == new_shelf_name:
         return  # No change needed
 
-    subentry.shelf = new_shelf
+    # Get the new shelf object and set shelf_id
+    new_shelf = _shelves_by_name.get(new_shelf_name)
+    if not new_shelf:
+        return
+
+    subentry.shelf_id = new_shelf.id
     await entry_obj.save()
 
     # Reload subentries to update UI
     subentries_by_shelf = await load_subentries()
 
     # Update both old and new shelf containers if they exist
-    shelves_to_update = {old_shelf, new_shelf}
+    shelves_to_update = {old_shelf_name, new_shelf_name}
     for shelf in shelves_to_update:
         if shelf in shelves_ui:
             container_ref = shelves_ui[shelf]
@@ -115,15 +144,21 @@ async def handle_drop(entry_id: str, subentry_name: str, target_shelf: str) -> N
 @app.post("/api/move-entry")
 async def move_entry_api(request: Request):
     """API endpoint for moving entries between shelves via drag-drop."""
+    global _shelves_by_name
+
     data = await request.json()
     entry_id = data.get("entry_id")
     subentry_name = data.get("subentry_name", "")
-    target_shelf = data.get("target_shelf")
+    target_shelf_name = data.get("target_shelf")
 
-    if not entry_id or not target_shelf:
+    if not entry_id or not target_shelf_name:
         return {"success": False, "error": "Missing required fields"}
 
     try:
+        # Ensure shelves are loaded
+        if not _shelves_by_name:
+            await load_shelves()
+
         entry_obj = await Entry.get(entry_id)
         if not entry_obj:
             return {"success": False, "error": "Entry not found"}
@@ -138,13 +173,22 @@ async def move_entry_api(request: Request):
         if not subentry:
             return {"success": False, "error": "Subentry not found"}
 
-        old_shelf = subentry.shelf or DEFAULT_SHELF
-        if old_shelf == target_shelf:
+        old_shelf_name = subentry.shelf_name
+        if old_shelf_name == target_shelf_name:
             return {"success": True, "message": "No change needed"}
 
-        subentry.shelf = target_shelf
+        # Get the target shelf object and set shelf_id
+        target_shelf = _shelves_by_name.get(target_shelf_name)
+        if not target_shelf:
+            return {"success": False, "error": "Target shelf not found"}
+
+        subentry.shelf_id = target_shelf.id
         await entry_obj.save()
-        return {"success": True, "old_shelf": old_shelf, "new_shelf": target_shelf}
+        return {
+            "success": True,
+            "old_shelf": old_shelf_name,
+            "new_shelf": target_shelf_name,
+        }
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -219,7 +263,7 @@ def create_subentry_card(entry: Entry, subentry: SubEntry, shelves_ui: dict) -> 
 
             # Shelf selector dropdown
             with ui.column().classes("ml-4 items-end"):
-                current_shelf = subentry.shelf or DEFAULT_SHELF
+                current_shelf_name = subentry.shelf_name
                 entry_id_captured = str(entry.id)
                 subentry_name_captured = subentry.name
 
@@ -232,7 +276,7 @@ def create_subentry_card(entry: Entry, subentry: SubEntry, shelves_ui: dict) -> 
 
                 ui.select(
                     options=get_all_shelves(),
-                    value=current_shelf,
+                    value=current_shelf_name,
                     on_change=make_callback(
                         entry_id_captured, subentry_name_captured, shelves_ui
                     ),
@@ -366,15 +410,14 @@ async def setup_ui():
         if not subentries_by_shelf:
             ui.label("No entries found.").classes("text-lg text-gray-500")
         else:
-            # Sort shelves with required shelves first
-            shelves = sorted(subentries_by_shelf.keys())
+            # Sort shelves by weight using the shelf objects
+            global _shelves_by_name
+            shelf_names = list(subentries_by_shelf.keys())
             sorted_shelves = sorted(
-                shelves,
-                key=lambda x: (
-                    x not in REQUIRED_SHELVES,
-                    REQUIRED_SHELVES.index(x) if x in REQUIRED_SHELVES else 999,
-                    x,
-                ),
+                shelf_names,
+                key=lambda x: _shelves_by_name[x].weight
+                if x in _shelves_by_name
+                else 999999,
             )
 
             # Create containers for each shelf that we can update

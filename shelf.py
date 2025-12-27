@@ -261,7 +261,9 @@ async def process_upcoming(days: int = 49):
 
         if existing_entry:
             # Check if any existing subentry is in Icebox
-            has_icebox = any(sub.shelf_id == icebox_shelf.id for sub in existing_entry.subentries)
+            has_icebox = any(
+                sub.shelf_id == icebox_shelf.id for sub in existing_entry.subentries
+            )
             default_shelf_id = icebox_shelf.id if has_icebox else backlog_shelf.id
             default_shelf_name = "Icebox" if has_icebox else "Backlog"
 
@@ -506,7 +508,9 @@ async def process_books():
             links=[f"https://www.goodreads.com/book/show/{book['goodreads_id']}"],
             rating=int(book["rating"] * 20) if book["rating"] else None,
         )
-        typer.echo(f"Adding {get_emoji_for_type(entry.type)} {entry.name} to {shelf_name}")
+        typer.echo(
+            f"Adding {get_emoji_for_type(entry.type)} {entry.name} to {shelf_name}"
+        )
         await entry.save()
 
 

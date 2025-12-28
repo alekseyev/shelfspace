@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 
 from beanie import init_beanie
 import typer
@@ -221,12 +221,43 @@ async def process_shows():
 async def process_upcoming(days: int = 49):
     """Add upcoming episodes from Trakt calendar that aren't in DB yet.
 
-    By default, new episodes go to "Backlog" shelf.
-    If the show has older episodes in "Icebox", new episodes go to "Icebox" instead.
+    Episodes are placed into shelves based on their air date:
+    - If air date falls within a shelf's date range, episode goes there
+    - If show has older episodes in "Icebox", new episodes go to "Icebox"
+    - Otherwise episodes go to "Backlog"
+
+    Also updates existing episodes in "Backlog" to move them to appropriate dated shelves.
     """
     await init_db()
-    icebox_shelf = await Shelf.find_one(Shelf.name == "Icebox")
-    backlog_shelf = await Shelf.find_one(Shelf.name == "Backlog")
+
+    # Load all active shelves
+    shelves_dict = await Shelf.get_shelves_dict()
+
+    # Get icebox and backlog shelves from dict
+    icebox_shelf = next(s for s in shelves_dict.values() if s.name == "Icebox")
+    backlog_shelf = next(s for s in shelves_dict.values() if s.name == "Backlog")
+
+    # Get dated shelves (those with start and end dates)
+    dated_shelves = [s for s in shelves_dict.values() if s.start_date and s.end_date]
+    # Sort by start date for efficient lookup
+    dated_shelves.sort(key=lambda s: s.start_date)
+
+    def find_shelf_for_date(air_date: date | None, has_icebox: bool) -> str:
+        """Find appropriate shelf for an episode based on air date.
+
+        Returns shelf_id.
+        """
+        if not air_date:
+            # No air date - use default logic
+            return icebox_shelf.id if has_icebox else backlog_shelf.id
+
+        # Check if air date falls within any dated shelf
+        for shelf in dated_shelves:
+            if shelf.start_date <= air_date <= shelf.end_date:
+                return shelf.id
+
+        # No matching dated shelf - use default logic
+        return icebox_shelf.id if has_icebox else backlog_shelf.id
 
     typer.echo("Fetching upcoming episodes from Trakt...")
     secrets = get_trakt_secrets()
@@ -250,6 +281,7 @@ async def process_upcoming(days: int = 49):
         episodes_by_season[season_key]["episodes"].append(ep)
 
     added_count = 0
+    updated_count = 0
     for season_key, season_data in episodes_by_season.items():
         show_trakt_id = season_data["show_trakt_id"]
         season_number = season_data["season"]
@@ -264,11 +296,21 @@ async def process_upcoming(days: int = 49):
             has_icebox = any(
                 sub.shelf_id == icebox_shelf.id for sub in existing_entry.subentries
             )
-            default_shelf_id = icebox_shelf.id if has_icebox else backlog_shelf.id
-            default_shelf_name = "Icebox" if has_icebox else "Backlog"
 
             # Find existing episode numbers
             existing_ep_names = {sub.name for sub in existing_entry.subentries}
+
+            # Update existing episodes in Backlog to appropriate dated shelves
+            for sub in existing_entry.subentries:
+                if sub.shelf_id == backlog_shelf.id and sub.release_date:
+                    new_shelf_id = find_shelf_for_date(sub.release_date, has_icebox)
+                    if new_shelf_id != backlog_shelf.id:
+                        sub.shelf_id = new_shelf_id
+                        new_shelf_name = shelves_dict[new_shelf_id].name
+                        typer.echo(
+                            f"Moving {show_title} {sub.name} from Backlog to {new_shelf_name}"
+                        )
+                        updated_count += 1
 
             # Add missing episodes
             entry_added_count = 0
@@ -284,18 +326,22 @@ async def process_upcoming(days: int = 49):
                     )
                     release_date = aired_dt.date()
 
+                # Find appropriate shelf based on air date
+                shelf_id = find_shelf_for_date(release_date, has_icebox)
+                shelf_name = shelves_dict[shelf_id].name
+
                 new_subentry = SubEntry(
-                    shelf_id=default_shelf_id,
+                    shelf_id=shelf_id,
                     name=ep_name,
                     estimated=ep["runtime"],
                     release_date=release_date,
                 )
                 existing_entry.subentries.append(new_subentry)
-                typer.echo(f"Adding {show_title} {ep_name} to {default_shelf_name}")
+                typer.echo(f"Adding {show_title} {ep_name} to {shelf_name}")
                 entry_added_count += 1
                 added_count += 1
 
-            if entry_added_count > 0:
+            if entry_added_count > 0 or updated_count > 0:
                 await existing_entry.save()
         else:
             # Entry doesn't exist - check if show has ANY season in Icebox
@@ -305,8 +351,7 @@ async def process_upcoming(days: int = 49):
                     "subentries.shelf_id": icebox_shelf.id,
                 }
             )
-            default_shelf_id = icebox_shelf.id if any_icebox_entry else backlog_shelf.id
-            default_shelf_name = "Icebox" if any_icebox_entry else "Backlog"
+            has_icebox = bool(any_icebox_entry)
 
             # Get season summary to determine if multi-season
             seasons_summary = api.get_seasons_summary(show_trakt_id)
@@ -319,6 +364,7 @@ async def process_upcoming(days: int = 49):
 
             # Build subentries for the upcoming episodes
             subentries = []
+            shelves_used = set()
             for ep in season_data["episodes"]:
                 ep_name = f"S{season_number:02d}E{ep['episode']:02d}"
                 release_date = None
@@ -328,9 +374,13 @@ async def process_upcoming(days: int = 49):
                     )
                     release_date = aired_dt.date()
 
+                # Find appropriate shelf based on air date
+                shelf_id = find_shelf_for_date(release_date, has_icebox)
+                shelves_used.add(shelves_dict[shelf_id].name)
+
                 subentries.append(
                     SubEntry(
-                        shelf_id=default_shelf_id,
+                        shelf_id=shelf_id,
                         name=ep_name,
                         estimated=ep["runtime"],
                         release_date=release_date,
@@ -351,13 +401,16 @@ async def process_upcoming(days: int = 49):
                 },
                 links=[f"https://trakt.tv/shows/{show_slug}/seasons/{season_number}"],
             )
+            shelves_summary = ", ".join(sorted(shelves_used))
             typer.echo(
-                f"Adding {entry_name} ({len(subentries)} episodes) to {default_shelf_name}"
+                f"Adding {entry_name} ({len(subentries)} episodes) to {shelves_summary}"
             )
             await entry.save()
             added_count += len(subentries)
 
-    typer.echo(f"Added {added_count} new episodes")
+    typer.echo(
+        f"Added {added_count} new episodes, updated {updated_count} existing episodes"
+    )
     # Save tokens (in case they were refreshed during API calls)
     save_trakt_secrets(**api._get_tokens())
 

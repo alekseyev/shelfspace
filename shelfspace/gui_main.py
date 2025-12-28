@@ -228,8 +228,7 @@ def build_shelf_content(
 
                 # Sort entries by name
                 sorted_entry_ids = sorted(
-                    entries_map.keys(),
-                    key=lambda eid: entry_objects[eid].name
+                    entries_map.keys(), key=lambda eid: entry_objects[eid].name
                 )
 
                 # Display each entry
@@ -306,7 +305,9 @@ def create_subentry_card(entry: Entry, subentry: SubEntry, shelves_ui: dict) -> 
                 ).props("dense outlined")
 
 
-def create_grouped_entry_card(entry: Entry, subentries: list[SubEntry], shelves_ui: dict) -> None:
+def create_grouped_entry_card(
+    entry: Entry, subentries: list[SubEntry], shelves_ui: dict
+) -> None:
     """Create a card for an entry with multiple subentries grouped together."""
     entry_id = str(entry.id)
 
@@ -328,7 +329,9 @@ def create_grouped_entry_card(entry: Entry, subentries: list[SubEntry], shelves_
                     ui.label(f"Year: {year}")
                     ui.label(rating_str)
                     ui.label(f"Total Est: {format_minutes(total_estimated)}")
-                    ui.label(f"Total Spent: {format_minutes(total_spent) if total_spent else '—'}")
+                    ui.label(
+                        f"Total Spent: {format_minutes(total_spent) if total_spent else '—'}"
+                    )
                 if entry.notes:
                     ui.label(f"Notes: {entry.notes}").classes(
                         "text-sm text-gray-600 italic"
@@ -361,9 +364,7 @@ def create_subentry_row(entry: Entry, subentry: SubEntry, shelves_ui: dict) -> N
             estimated_formatted = (
                 format_minutes(subentry.estimated) if subentry.estimated else "N/A"
             )
-            spent_formatted = (
-                format_minutes(subentry.spent) if subentry.spent else "—"
-            )
+            spent_formatted = format_minutes(subentry.spent) if subentry.spent else "—"
             status_str = "✓" if subentry.is_finished else "○"
 
             ui.label(f"{status_str} {subentry_name}").classes("text-base font-medium")

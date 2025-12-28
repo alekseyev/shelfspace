@@ -181,8 +181,18 @@ def build_shelf_content(
 ) -> None:
     """Build the content for a shelf container."""
     subentry_count = len(subentries)
+
+    # Calculate totals for the shelf
+    total_estimated = sum(sub.estimated or 0 for _, sub in subentries)
+    total_spent = sum(sub.spent or 0 for _, sub in subentries)
+
     with container:
-        ui.label(f"📚 {shelf} ({subentry_count})").classes("text-xl font-semibold")
+        # Shelf header with totals
+        with ui.row().classes("w-full items-baseline gap-4"):
+            ui.label(f"📚 {shelf}").classes("text-xl font-semibold")
+            ui.label(f"({subentry_count} items)").classes("text-base text-gray-600")
+            ui.label(f"Est: {format_minutes(total_estimated)}").classes("text-base text-gray-700")
+            ui.label(f"Spent: {format_minutes(total_spent) if total_spent else '—'}").classes("text-base text-gray-700")
 
         # Create the container for this shelf
         shelf_container = ui.column().classes(

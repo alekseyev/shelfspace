@@ -104,7 +104,7 @@ async def process_movies():
     typer.echo("Fetching watchlist movies...")
     watchlist_movies = api.get_movies()
     typer.echo("Fetching maybe list movies...")
-    maybe_movies = api.get_movies("maybe")
+    maybe_movies = api.get_movies("maybe") + api.get_movies("rewatch")
 
     # Combine and deduplicate by trakt_id
     movies_by_id = {m["trakt_id"]: m for m in watchlist_movies}

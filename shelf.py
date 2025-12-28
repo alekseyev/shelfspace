@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta
 
 from beanie import init_beanie
 import typer
@@ -30,6 +30,45 @@ async def init_db():
         database=mongo_client[settings.MONGO_DB],
         document_models=[Entry, Shelf],
     )
+
+
+def get_current_shelf_for_datetime(
+    watched_dt: datetime, shelves_dict: dict[str, Shelf]
+) -> Shelf:
+    """Determine the current shelf for a given datetime.
+
+    A shelf is considered current until 4:00 of the next calendar day after end_date.
+
+    Args:
+        watched_dt: The datetime when the item was watched (timezone-aware)
+        shelves_dict: Dictionary of shelf_id -> Shelf
+
+    Returns:
+        The appropriate shelf for this datetime
+    """
+    # Get dated shelves (those with start and end dates)
+    dated_shelves = [s for s in shelves_dict.values() if s.start_date and s.end_date]
+    # Sort by start date
+    dated_shelves.sort(key=lambda s: s.start_date)
+
+    # Convert watched_dt to naive local time for comparison
+    # (assuming shelves use local timezone)
+    watched_naive = watched_dt.replace(tzinfo=None)
+
+    # Check each dated shelf
+    for shelf in dated_shelves:
+        # Shelf is current from start_date 00:00 to end_date+1 04:00
+        shelf_start = datetime.combine(shelf.start_date, time(0, 0))
+        shelf_end = datetime.combine(
+            shelf.end_date + timedelta(days=1), time(4, 0)
+        )
+
+        if shelf_start <= watched_naive < shelf_end:
+            return shelf
+
+    # No matching dated shelf - use unfinished shelf with minimum weight
+    unfinished_shelves = [s for s in shelves_dict.values() if not s.is_finished]
+    return min(unfinished_shelves, key=lambda s: s.weight)
 
 
 async def add_new_entries(entries: list[Entry]):
@@ -564,6 +603,301 @@ async def process_books():
         typer.echo(
             f"Adding {get_emoji_for_type(entry.type)} {entry.name} to {shelf_name}"
         )
+        await entry.save()
+
+
+@app.async_command()
+async def process_watched(limit: int = 10):
+    """Sync recently watched movies and episodes from Trakt.
+
+    Checks the last N watched items and updates the database:
+    - Creates entries if they don't exist
+    - Moves subentries to the appropriate shelf based on watch time
+    - Marks subentries as finished with spent=estimated
+    - Creates new subentries if rewatching (previous in finished shelf)
+
+    Args:
+        limit: Number of recent watch history items to process (default: 5)
+    """
+    await init_db()
+
+    # Load all shelves
+    shelves_dict = await Shelf.get_shelves_dict()
+    icebox_shelf = next(s for s in shelves_dict.values() if s.name == "Icebox")
+
+    typer.echo("Fetching watch history from Trakt...")
+    secrets = get_trakt_secrets()
+    api = TraktAPI(**secrets)
+
+    history = api.get_watch_history(limit)
+    typer.echo(f"Found {len(history)} recently watched items")
+
+    for item in history:
+        # Parse watched_at timestamp (ISO format with Z)
+        watched_dt = datetime.fromisoformat(item["watched_at"].replace("Z", "+00:00"))
+        # Determine the appropriate shelf for this watch time
+        target_shelf = get_current_shelf_for_datetime(watched_dt, shelves_dict)
+
+        if item["type"] == "movie":
+            await _process_watched_movie(
+                item, api, target_shelf, icebox_shelf, shelves_dict
+            )
+        elif item["type"] == "episode":
+            await _process_watched_episode(
+                item, api, target_shelf, icebox_shelf, shelves_dict
+            )
+
+    typer.echo("Watch history sync complete")
+    # Save tokens (in case they were refreshed during API calls)
+    save_trakt_secrets(**api._get_tokens())
+
+
+async def _process_watched_movie(
+    item: dict,
+    api: TraktAPI,
+    target_shelf: Shelf,
+    icebox_shelf: Shelf,
+    shelves_dict: dict[str, Shelf],
+):
+    """Process a watched movie from history."""
+    trakt_id = item["trakt_id"]
+
+    # Find existing entry
+    entry = await Entry.find_one(Entry.metadata["trakt_id"] == trakt_id)
+
+    if not entry:
+        # Create new entry
+        movie_data = api.get_movie_data(trakt_id)
+        release_date = None
+        if movie_data["release_date"]:
+            release_date = datetime.fromisoformat(movie_data["release_date"])
+
+        entry = Entry(
+            type=MediaType.MOVIE.value,
+            name=item["title"],
+            subentries=[
+                SubEntry(
+                    shelf_id=target_shelf.id,
+                    estimated=movie_data["runtime"],
+                    spent=movie_data["runtime"],
+                    is_finished=True,
+                    release_date=release_date,
+                )
+            ],
+            release_date=release_date,
+            metadata={"trakt_id": trakt_id},
+            links=[f"https://trakt.tv/movies/{item['slug']}"],
+            rating=int(movie_data["rating"]) if movie_data["rating"] else None,
+        )
+        typer.echo(
+            f"✓ Created movie '{entry.name}' in {target_shelf.name} (watched)"
+        )
+        await entry.save()
+        return
+
+    # Entry exists - check if there's an unfinished subentry or if we need to create a new one
+    unfinished_sub = None
+    finished_shelf_ids = {
+        s.id for s in shelves_dict.values() if s.is_finished
+    }
+
+    for sub in entry.subentries:
+        if not sub.is_finished:
+            unfinished_sub = sub
+            break
+
+    if unfinished_sub:
+        # Update existing unfinished subentry
+        changed = False
+        if unfinished_sub.shelf_id != target_shelf.id:
+            old_shelf_name = shelves_dict[unfinished_sub.shelf_id].name
+            unfinished_sub.shelf_id = target_shelf.id
+            typer.echo(
+                f"✓ Moved '{entry.name}' from {old_shelf_name} to {target_shelf.name}"
+            )
+            changed = True
+
+        if not unfinished_sub.is_finished:
+            unfinished_sub.is_finished = True
+            if unfinished_sub.estimated:
+                unfinished_sub.spent = unfinished_sub.estimated
+            typer.echo(f"✓ Marked '{entry.name}' as finished")
+            changed = True
+
+        if changed:
+            await entry.save()
+    else:
+        # All subentries are finished - check if any are in non-finished shelves
+        # If so, it's already been processed - skip it
+        has_finished_in_active_shelf = any(
+            sub.is_finished and sub.shelf_id not in finished_shelf_ids
+            for sub in entry.subentries
+        )
+
+        if has_finished_in_active_shelf:
+            # Already processed, skip
+            return
+
+        # All subentries are in finished shelves - create a new one (rewatch)
+        movie_data = api.get_movie_data(trakt_id)
+        new_sub = SubEntry(
+            shelf_id=target_shelf.id,
+            estimated=movie_data["runtime"],
+            spent=movie_data["runtime"],
+            is_finished=True,
+        )
+        entry.subentries.append(new_sub)
+        typer.echo(
+            f"✓ Created new subentry for '{entry.name}' in {target_shelf.name} (rewatch)"
+        )
+        await entry.save()
+
+
+async def _process_watched_episode(
+    item: dict,
+    api: TraktAPI,
+    target_shelf: Shelf,
+    icebox_shelf: Shelf,
+    shelves_dict: dict[str, Shelf],
+):
+    """Process a watched episode from history."""
+    show_trakt_id = item["show_trakt_id"]
+    season_number = item["season"]
+    episode_number = item["episode"]
+    season_key = f"{show_trakt_id}_s{season_number}"
+    ep_name = f"S{season_number:02d}E{episode_number:02d}"
+
+    # Find existing entry for this season
+    entry = await Entry.find_one(Entry.metadata["trakt_id"] == season_key)
+
+    if not entry:
+        # Entry doesn't exist - create it
+        # Get season summary to determine if multi-season
+        seasons_summary = api.get_seasons_summary(show_trakt_id)
+        valid_seasons = [s for s in seasons_summary if s["number"]]
+        is_multi_season = len(valid_seasons) > 1
+
+        entry_name = (
+            f"{item['show_title']} S{season_number}"
+            if is_multi_season
+            else item["show_title"]
+        )
+
+        # Fetch episode data
+        episode_data = api.get_episode_data(show_trakt_id, season_number, episode_number)
+
+        release_date = None
+        if episode_data["first_aired"]:
+            aired_dt = datetime.fromisoformat(
+                episode_data["first_aired"].replace("Z", "+00:00")
+            )
+            release_date = aired_dt.date()
+
+        entry = Entry(
+            type=MediaType.SERIES.value,
+            name=entry_name,
+            subentries=[
+                SubEntry(
+                    shelf_id=target_shelf.id,
+                    name=ep_name,
+                    estimated=episode_data["runtime"],
+                    spent=episode_data["runtime"],
+                    is_finished=True,
+                    release_date=release_date,
+                )
+            ],
+            release_date=release_date,
+            metadata={
+                "trakt_id": season_key,
+                "show_trakt_id": show_trakt_id,
+            },
+            links=[
+                f"https://trakt.tv/shows/{item['show_slug']}/seasons/{season_number}"
+            ],
+        )
+        typer.echo(
+            f"✓ Created episode '{entry.name} {ep_name}' in {target_shelf.name} (watched)"
+        )
+        await entry.save()
+        return
+
+    # Entry exists - find the specific episode subentry
+    episode_sub = None
+    for sub in entry.subentries:
+        if sub.name == ep_name:
+            episode_sub = sub
+            break
+
+    finished_shelf_ids = {
+        s.id for s in shelves_dict.values() if s.is_finished
+    }
+
+    if not episode_sub:
+        # Episode doesn't exist - create it
+        episode_data = api.get_episode_data(show_trakt_id, season_number, episode_number)
+        release_date = None
+        if episode_data["first_aired"]:
+            aired_dt = datetime.fromisoformat(
+                episode_data["first_aired"].replace("Z", "+00:00")
+            )
+            release_date = aired_dt.date()
+
+        new_sub = SubEntry(
+            shelf_id=target_shelf.id,
+            name=ep_name,
+            estimated=episode_data["runtime"],
+            spent=episode_data["runtime"],
+            is_finished=True,
+            release_date=release_date,
+        )
+        entry.subentries.append(new_sub)
+        typer.echo(
+            f"✓ Created episode '{entry.name} {ep_name}' in {target_shelf.name} (watched)"
+        )
+        await entry.save()
+        return
+
+    # Episode exists - check if finished and in finished shelf
+    if episode_sub.is_finished and episode_sub.shelf_id in finished_shelf_ids:
+        # Create new subentry (rewatch)
+        episode_data = api.get_episode_data(show_trakt_id, season_number, episode_number)
+        new_sub = SubEntry(
+            shelf_id=target_shelf.id,
+            name=ep_name,
+            estimated=episode_data["runtime"],
+            spent=episode_data["runtime"],
+            is_finished=True,
+            release_date=episode_sub.release_date,
+        )
+        entry.subentries.append(new_sub)
+        typer.echo(
+            f"✓ Created new subentry for '{entry.name} {ep_name}' in {target_shelf.name} (rewatch)"
+        )
+        await entry.save()
+        return
+
+    # Episode is already finished in an active shelf - skip
+    if episode_sub.is_finished and episode_sub.shelf_id not in finished_shelf_ids:
+        return
+
+    # Update existing unfinished episode
+    changed = False
+    if episode_sub.shelf_id != target_shelf.id:
+        old_shelf_name = shelves_dict[episode_sub.shelf_id].name
+        episode_sub.shelf_id = target_shelf.id
+        typer.echo(
+            f"✓ Moved '{entry.name} {ep_name}' from {old_shelf_name} to {target_shelf.name}"
+        )
+        changed = True
+
+    if not episode_sub.is_finished:
+        episode_sub.is_finished = True
+        if episode_sub.estimated:
+            episode_sub.spent = episode_sub.estimated
+        typer.echo(f"✓ Marked '{entry.name} {ep_name}' as finished")
+        changed = True
+
+    if changed:
         await entry.save()
 
 

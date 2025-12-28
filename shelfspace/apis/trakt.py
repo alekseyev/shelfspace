@@ -374,3 +374,41 @@ class TraktAPI(BaseAPI):
             )
 
         return result
+
+    def get_watch_history(self, limit: int = 5) -> list[dict]:
+        """Get recently watched movies and episodes.
+
+        Args:
+            limit: Maximum number of items to return
+
+        Returns:
+            List of dicts with type ('movie' or 'episode'), watched_at, and item details
+        """
+        history_data = self._get(
+            "/users/me/history",
+            params={"limit": limit}
+        )
+
+        result = []
+        for item in history_data:
+            if item["type"] == "movie":
+                result.append({
+                    "type": "movie",
+                    "watched_at": item["watched_at"],
+                    "trakt_id": item["movie"]["ids"]["trakt"],
+                    "slug": item["movie"]["ids"]["slug"],
+                    "title": item["movie"]["title"],
+                    "year": item["movie"]["year"],
+                })
+            elif item["type"] == "episode":
+                result.append({
+                    "type": "episode",
+                    "watched_at": item["watched_at"],
+                    "show_trakt_id": item["show"]["ids"]["trakt"],
+                    "show_slug": item["show"]["ids"]["slug"],
+                    "show_title": item["show"]["title"],
+                    "season": item["episode"]["season"],
+                    "episode": item["episode"]["number"],
+                })
+
+        return result

@@ -216,14 +216,37 @@ def build_shelf_content(
                     "text-center text-gray-400 py-4 italic w-full"
                 )
             else:
-                for entry, subentry in sorted(
-                    subentries, key=lambda x: x[1].name or x[0].name
-                ):
-                    create_subentry_card(entry, subentry, shelves_ui)
+                # Group subentries by entry
+                entries_map: dict[str, list[SubEntry]] = {}
+                entry_objects: dict[str, Entry] = {}
+                for entry, subentry in subentries:
+                    entry_id = str(entry.id)
+                    if entry_id not in entries_map:
+                        entries_map[entry_id] = []
+                        entry_objects[entry_id] = entry
+                    entries_map[entry_id].append(subentry)
+
+                # Sort entries by name
+                sorted_entry_ids = sorted(
+                    entries_map.keys(),
+                    key=lambda eid: entry_objects[eid].name
+                )
+
+                # Display each entry
+                for entry_id in sorted_entry_ids:
+                    entry = entry_objects[entry_id]
+                    subs = entries_map[entry_id]
+
+                    if len(subs) == 1:
+                        # Single subentry: show as individual card
+                        create_subentry_card(entry, subs[0], shelves_ui)
+                    else:
+                        # Multiple subentries: show grouped
+                        create_grouped_entry_card(entry, subs, shelves_ui)
 
 
 def create_subentry_card(entry: Entry, subentry: SubEntry, shelves_ui: dict) -> None:
-    """Create a card for a subentry with shelf selector."""
+    """Create a card for a single subentry with shelf selector."""
     entry_id = str(entry.id)
     subentry_name_val = subentry.name or ""
 
@@ -281,6 +304,92 @@ def create_subentry_card(entry: Entry, subentry: SubEntry, shelves_ui: dict) -> 
                         entry_id_captured, subentry_name_captured, shelves_ui
                     ),
                 ).props("dense outlined")
+
+
+def create_grouped_entry_card(entry: Entry, subentries: list[SubEntry], shelves_ui: dict) -> None:
+    """Create a card for an entry with multiple subentries grouped together."""
+    entry_id = str(entry.id)
+
+    # Calculate totals for the entry
+    total_estimated = sum(s.estimated or 0 for s in subentries)
+    total_spent = sum(s.spent or 0 for s in subentries)
+
+    with ui.card().classes("w-full"):
+        # Entry header
+        with ui.row().classes("w-full items-start justify-between mb-2"):
+            with ui.column().classes("flex-1 gap-1"):
+                emoji = get_emoji_for_type(entry.type)
+                year = entry.release_date.year if entry.release_date else "N/A"
+                rating_str = f"⭐ {entry.rating}" if entry.rating else "—"
+
+                ui.label(f"{emoji} {entry.name}").classes("text-xl font-bold")
+                with ui.row().classes("gap-4 text-sm flex-wrap"):
+                    ui.label(f"Type: {entry.type.value}")
+                    ui.label(f"Year: {year}")
+                    ui.label(rating_str)
+                    ui.label(f"Total Est: {format_minutes(total_estimated)}")
+                    ui.label(f"Total Spent: {format_minutes(total_spent) if total_spent else '—'}")
+                if entry.notes:
+                    ui.label(f"Notes: {entry.notes}").classes(
+                        "text-sm text-gray-600 italic"
+                    )
+
+        # Subentries list
+        ui.separator()
+        with ui.column().classes("w-full gap-1 mt-2"):
+            for subentry in sorted(subentries, key=lambda s: s.name or ""):
+                create_subentry_row(entry, subentry, shelves_ui)
+
+
+def create_subentry_row(entry: Entry, subentry: SubEntry, shelves_ui: dict) -> None:
+    """Create a draggable row for a subentry within a grouped entry."""
+    entry_id = str(entry.id)
+    subentry_name_val = subentry.name or ""
+
+    # Create draggable container for the subentry
+    row_container = ui.row().classes(
+        "w-full items-center justify-between p-2 hover:bg-gray-100 rounded draggable-card"
+    )
+    row_container._props["draggable"] = "true"
+    row_container._props["data-entry-id"] = entry_id
+    row_container._props["data-subentry-name"] = subentry_name_val
+
+    with row_container:
+        # Subentry info
+        with ui.row().classes("flex-1 gap-4 items-center flex-wrap"):
+            subentry_name = subentry.name or entry.name
+            estimated_formatted = (
+                format_minutes(subentry.estimated) if subentry.estimated else "N/A"
+            )
+            spent_formatted = (
+                format_minutes(subentry.spent) if subentry.spent else "—"
+            )
+            status_str = "✓" if subentry.is_finished else "○"
+
+            ui.label(f"{status_str} {subentry_name}").classes("text-base font-medium")
+            ui.label(f"Est: {estimated_formatted}").classes("text-sm")
+            ui.label(f"Spent: {spent_formatted}").classes("text-sm")
+
+        # Shelf selector dropdown
+        with ui.column().classes("ml-4"):
+            current_shelf_name = subentry.shelf_name
+            entry_id_captured = str(entry.id)
+            subentry_name_captured = subentry.name
+
+            # Define callback that captures entry_id and subentry_name separately
+            def make_callback(eid: str, sename: str, ui_ref: dict):
+                async def on_shelf_selected(e: ValueChangeEventArguments):
+                    await update_subentry_shelf(eid, sename, e.value, ui_ref)
+
+                return on_shelf_selected
+
+            ui.select(
+                options=get_all_shelves(),
+                value=current_shelf_name,
+                on_change=make_callback(
+                    entry_id_captured, subentry_name_captured, shelves_ui
+                ),
+            ).props("dense outlined").classes("min-w-[120px]")
 
 
 async def setup_ui():

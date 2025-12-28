@@ -384,31 +384,53 @@ class TraktAPI(BaseAPI):
         Returns:
             List of dicts with type ('movie' or 'episode'), watched_at, and item details
         """
-        history_data = self._get(
-            "/users/me/history",
-            params={"limit": limit}
-        )
+        history_data = self._get("/users/me/history", params={"limit": limit})
 
         result = []
         for item in history_data:
             if item["type"] == "movie":
-                result.append({
-                    "type": "movie",
-                    "watched_at": item["watched_at"],
-                    "trakt_id": item["movie"]["ids"]["trakt"],
-                    "slug": item["movie"]["ids"]["slug"],
-                    "title": item["movie"]["title"],
-                    "year": item["movie"]["year"],
-                })
+                result.append(
+                    {
+                        "type": "movie",
+                        "watched_at": item["watched_at"],
+                        "trakt_id": item["movie"]["ids"]["trakt"],
+                        "slug": item["movie"]["ids"]["slug"],
+                        "title": item["movie"]["title"],
+                        "year": item["movie"]["year"],
+                    }
+                )
             elif item["type"] == "episode":
-                result.append({
-                    "type": "episode",
-                    "watched_at": item["watched_at"],
-                    "show_trakt_id": item["show"]["ids"]["trakt"],
-                    "show_slug": item["show"]["ids"]["slug"],
-                    "show_title": item["show"]["title"],
-                    "season": item["episode"]["season"],
-                    "episode": item["episode"]["number"],
-                })
+                result.append(
+                    {
+                        "type": "episode",
+                        "watched_at": item["watched_at"],
+                        "show_trakt_id": item["show"]["ids"]["trakt"],
+                        "show_slug": item["show"]["ids"]["slug"],
+                        "show_title": item["show"]["title"],
+                        "season": item["episode"]["season"],
+                        "episode": item["episode"]["number"],
+                    }
+                )
 
         return result
+
+    def remove_from_list(
+        self, list_slug: str, movies: list[int] = None, shows: list[int] = None
+    ) -> dict:
+        """Remove items from a custom list.
+
+        Args:
+            list_slug: The slug of the list to remove items from
+            movies: List of movie trakt IDs to remove
+            shows: List of show trakt IDs to remove
+
+        Returns:
+            Response dict with deletion results
+        """
+        payload = {}
+        if movies:
+            payload["movies"] = [{"ids": {"trakt": movie_id}} for movie_id in movies]
+        if shows:
+            payload["shows"] = [{"ids": {"trakt": show_id}} for show_id in shows]
+
+        return self._post(f"/users/me/lists/{list_slug}/items/remove", params=payload)

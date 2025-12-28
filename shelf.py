@@ -59,9 +59,7 @@ def get_current_shelf_for_datetime(
     for shelf in dated_shelves:
         # Shelf is current from start_date 00:00 to end_date+1 04:00
         shelf_start = datetime.combine(shelf.start_date, time(0, 0))
-        shelf_end = datetime.combine(
-            shelf.end_date + timedelta(days=1), time(4, 0)
-        )
+        shelf_end = datetime.combine(shelf.end_date + timedelta(days=1), time(4, 0))
 
         if shelf_start <= watched_naive < shelf_end:
             return shelf
@@ -607,6 +605,62 @@ async def process_books():
 
 
 @app.async_command()
+async def update_trakt_lists(limit: int = 10):
+    """Remove recently watched items from Trakt 'maybe' and 'rewatch' lists.
+
+    Checks recent watch history and removes those items from the specified lists
+    to keep them clean.
+
+    Args:
+        limit: Number of recent watch history items to check (default: 50)
+    """
+    typer.echo("Fetching watch history from Trakt...")
+    secrets = get_trakt_secrets()
+    api = TraktAPI(**secrets)
+
+    history = api.get_watch_history(limit)
+    typer.echo(f"Found {len(history)} recently watched items")
+
+    # Collect unique movie and show IDs from watch history
+    watched_movie_ids = set()
+    watched_show_ids = set()
+
+    for item in history:
+        if item["type"] == "movie":
+            watched_movie_ids.add(item["trakt_id"])
+        elif item["type"] == "episode":
+            watched_show_ids.add(item["show_trakt_id"])
+
+    typer.echo(
+        f"Found {len(watched_movie_ids)} unique movies, {len(watched_show_ids)} unique shows"
+    )
+
+    # Remove from both lists
+    lists_to_clean = ["maybe", "rewatch"]
+    for list_slug in lists_to_clean:
+        if watched_movie_ids or watched_show_ids:
+            typer.echo(f"Removing items from '{list_slug}' list...")
+            try:
+                result = api.remove_from_list(
+                    list_slug,
+                    movies=list(watched_movie_ids) if watched_movie_ids else None,
+                    shows=list(watched_show_ids) if watched_show_ids else None,
+                )
+                deleted = result.get("deleted", {})
+                movies_deleted = deleted.get("movies", 0)
+                shows_deleted = deleted.get("shows", 0)
+                typer.echo(
+                    f"  ✓ Removed {movies_deleted} movies, {shows_deleted} shows from '{list_slug}'"
+                )
+            except Exception as e:
+                typer.echo(f"  ✗ Error updating '{list_slug}': {e}")
+
+    typer.echo("List cleanup complete")
+    # Save tokens (in case they were refreshed during API calls)
+    save_trakt_secrets(**api._get_tokens())
+
+
+@app.async_command()
 async def process_watched(limit: int = 10):
     """Sync recently watched movies and episodes from Trakt.
 
@@ -689,17 +743,13 @@ async def _process_watched_movie(
             links=[f"https://trakt.tv/movies/{item['slug']}"],
             rating=int(movie_data["rating"]) if movie_data["rating"] else None,
         )
-        typer.echo(
-            f"✓ Created movie '{entry.name}' in {target_shelf.name} (watched)"
-        )
+        typer.echo(f"✓ Created movie '{entry.name}' in {target_shelf.name} (watched)")
         await entry.save()
         return
 
     # Entry exists - check if there's an unfinished subentry or if we need to create a new one
     unfinished_sub = None
-    finished_shelf_ids = {
-        s.id for s in shelves_dict.values() if s.is_finished
-    }
+    finished_shelf_ids = {s.id for s in shelves_dict.values() if s.is_finished}
 
     for sub in entry.subentries:
         if not sub.is_finished:
@@ -784,7 +834,9 @@ async def _process_watched_episode(
         )
 
         # Fetch episode data
-        episode_data = api.get_episode_data(show_trakt_id, season_number, episode_number)
+        episode_data = api.get_episode_data(
+            show_trakt_id, season_number, episode_number
+        )
 
         release_date = None
         if episode_data["first_aired"]:
@@ -828,13 +880,13 @@ async def _process_watched_episode(
             episode_sub = sub
             break
 
-    finished_shelf_ids = {
-        s.id for s in shelves_dict.values() if s.is_finished
-    }
+    finished_shelf_ids = {s.id for s in shelves_dict.values() if s.is_finished}
 
     if not episode_sub:
         # Episode doesn't exist - create it
-        episode_data = api.get_episode_data(show_trakt_id, season_number, episode_number)
+        episode_data = api.get_episode_data(
+            show_trakt_id, season_number, episode_number
+        )
         release_date = None
         if episode_data["first_aired"]:
             aired_dt = datetime.fromisoformat(
@@ -860,7 +912,9 @@ async def _process_watched_episode(
     # Episode exists - check if finished and in finished shelf
     if episode_sub.is_finished and episode_sub.shelf_id in finished_shelf_ids:
         # Create new subentry (rewatch)
-        episode_data = api.get_episode_data(show_trakt_id, season_number, episode_number)
+        episode_data = api.get_episode_data(
+            show_trakt_id, season_number, episode_number
+        )
         new_sub = SubEntry(
             shelf_id=target_shelf.id,
             name=ep_name,

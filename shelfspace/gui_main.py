@@ -1,4 +1,3 @@
-from fastapi import Request
 from nicegui import app, ui
 from nicegui.events import ValueChangeEventArguments
 
@@ -191,8 +190,12 @@ def build_shelf_content(
         with ui.row().classes("w-full items-baseline gap-4"):
             ui.label(f"📚 {shelf}").classes("text-xl font-semibold")
             ui.label(f"({subentry_count} items)").classes("text-base text-gray-600")
-            ui.label(f"Est: {format_minutes(total_estimated)}").classes("text-base text-gray-700")
-            ui.label(f"Spent: {format_minutes(total_spent) if total_spent else '—'}").classes("text-base text-gray-700")
+            ui.label(f"Est: {format_minutes(total_estimated)}").classes(
+                "text-base text-gray-700"
+            )
+            ui.label(
+                f"Spent: {format_minutes(total_spent) if total_spent else '—'}"
+            ).classes("text-base text-gray-700")
 
         # Create the container for this shelf
         shelf_container = ui.column().classes(
@@ -333,7 +336,9 @@ def create_grouped_entry_card(
 
                 def make_move_all_callback(eid: str, current_shelf: str, ui_ref: dict):
                     async def on_move_all(e: ValueChangeEventArguments):
-                        await update_all_subentries_shelf(eid, current_shelf, e.value, ui_ref)
+                        await update_all_subentries_shelf(
+                            eid, current_shelf, e.value, ui_ref
+                        )
 
                     return on_move_all
 
@@ -355,7 +360,9 @@ def create_grouped_entry_card(
 def create_subentry_row(entry: Entry, subentry: SubEntry, shelves_ui: dict) -> None:
     """Create a row for a subentry within a grouped entry."""
     # Create container for the subentry
-    with ui.row().classes("w-full items-center justify-between p-2 hover:bg-gray-100 rounded"):
+    with ui.row().classes(
+        "w-full items-center justify-between p-2 hover:bg-gray-100 rounded"
+    ):
         # Subentry info
         with ui.row().classes("flex-1 gap-4 items-center flex-wrap"):
             subentry_name = subentry.name or entry.name

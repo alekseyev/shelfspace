@@ -20,17 +20,17 @@ Shelves are the shelves that you can put your subentries into. Default shelves a
 
 class MediaType(str, enum.Enum):
     PROJECTS = "Projects"
-    COURSE = "Course"
-    MOVIE = "Movie"
-    SERIES = "Series"
-    GAME = "Game"
-    GAME_VR = "Game (VR)"
-    GAME_MOBILE = "Game (mobile)"
-    BOOK = "Book"
-    BOOK_ED = "Book (educational)"
-    BOOK_COM = "Book (comics)"
     ART = "Article"
     VID = "Talk/video"
+    COURSE = "Course"
+    BOOK_ED = "Book (educational)"
+    BOOK = "Book"
+    BOOK_COM = "Book (comics)"
+    MOVIE = "Movie"
+    SERIES = "Series"
+    GAME_VR = "Game (VR)"
+    GAME = "Game"
+    GAME_MOBILE = "Game (mobile)"
 
 
 def get_emoji_for_type(media_type):

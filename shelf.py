@@ -7,6 +7,7 @@ import typer
 from shelfspace.apis.goodreads import GoodreadsAPI
 from shelfspace.apis.hltb import HowlongAPI
 from shelfspace.apis.secrets import get_trakt_secrets, save_trakt_secrets
+from shelfspace.apis.steam import SteamAPI
 from shelfspace.apis.trakt import TraktAPI
 from shelfspace.estimations import (
     estimate_book_from_pages,
@@ -566,6 +567,108 @@ async def process_games():
 
         typer.echo(f"Adding {entry.name} ({entry.type.value}) to Icebox")
         await entry.save()
+
+
+@app.async_command()
+async def sync_steam_playtime():
+    """Sync playtime from Steam for all games with Steam IDs."""
+    await init_db()
+
+    # Load all shelves
+    shelves_dict = await Shelf.get_shelves_dict()
+
+    typer.echo("Fetching Steam playtime data...")
+    api = SteamAPI()
+    steam_games = await api.get_owned_games()
+
+    # Get current shelf for current datetime
+    current_shelf = get_current_shelf_for_datetime(datetime.now(), shelves_dict)
+
+    if not current_shelf:
+        typer.echo("Error: No current shelf found for current date", err=True)
+        return
+
+    typer.echo(f"Using '{current_shelf.name}' as current shelf")
+    typer.echo(f"Found {len(steam_games)} games on Steam")
+
+    added_count = 0
+    updated_count = 0
+    skipped_count = 0
+
+    for game in steam_games:
+        steam_id = game["appid"]
+        game_name = game["name"]
+        current_playtime = game.get("playtime_forever", 0)  # in minutes
+        if not current_playtime:
+            # No playtime recorded - skip
+            skipped_count += 1
+            continue
+
+        # Find entry by steam_id
+        entry = await Entry.find_one(Entry.metadata.steam_id == steam_id)
+
+        if not entry:
+            # Create new entry without subentries, store current playtime in metadata
+            entry = Entry(
+                type=MediaType.GAME.value,
+                name=game_name,
+                subentries=[],
+                metadata={
+                    "steam_id": steam_id,
+                    "steam_playtime": current_playtime,
+                },
+                links=[f"https://store.steampowered.com/app/{steam_id}/"],
+            )
+            await entry.save()
+            typer.echo(
+                f"✓ Added new game: {game_name} (Steam playtime: {format_minutes(current_playtime)})"
+            )
+            added_count += 1
+            continue
+
+        # Entry exists - compare with last synced playtime from metadata
+        last_synced_playtime = entry.metadata.get("steam_playtime", 0)
+
+        if current_playtime <= last_synced_playtime:
+            # No new playtime
+            skipped_count += 1
+            continue
+
+        # Calculate difference
+        playtime_diff = current_playtime - last_synced_playtime
+
+        if last_synced_playtime:
+            # Find or create subentry in current shelf
+            current_subentry = None
+            for sub in entry.subentries:
+                if sub.shelf_id == current_shelf.id:
+                    current_subentry = sub
+                    break
+
+            if not current_subentry:
+                # Create new subentry in current shelf
+                current_subentry = SubEntry(
+                    shelf_id=current_shelf.id,
+                    spent=playtime_diff,
+                )
+                entry.subentries.append(current_subentry)
+            else:
+                # Add to existing subentry
+                current_subentry.spent = (current_subentry.spent or 0) + playtime_diff
+
+        # Update metadata with current playtime
+        entry.metadata["steam_playtime"] = current_playtime
+
+        await entry.save()
+        typer.echo(
+            f"✓ Updated {game_name}: +{format_minutes(playtime_diff)} (Steam total: {format_minutes(current_playtime)})"
+        )
+        updated_count += 1
+
+    typer.echo("\n" + "=" * 80)
+    typer.echo(
+        f"Added: {added_count} | Updated: {updated_count} | Skipped: {skipped_count}"
+    )
 
 
 @app.async_command()

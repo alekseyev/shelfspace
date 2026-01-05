@@ -17,5 +17,8 @@ class Settings(BaseSettings):
     HLTB_USER: str = ""
     GOODREADS_USER: str = ""
 
+    STEAM_API_KEY: str = ""
+    STEAM_USER_ID: str = ""
+
 
 settings = Settings()

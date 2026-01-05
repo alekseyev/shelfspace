@@ -835,6 +835,13 @@ async def edit_entry_dialog(
             .classes("w-full")
         )
 
+        # Links input (one per line)
+        links_input = (
+            ui.textarea("Links (one per line)", value="\n".join(entry.links))
+            .props("outlined dense")
+            .classes("w-full")
+        )
+
         # Time fields - only show if NOT movie/series AND we have a subentry
         estimated_hours_input = None
         spent_hours_input = None
@@ -872,6 +879,13 @@ async def edit_entry_dialog(
                 entry.name = name_input.value
                 entry.type = MediaType(type_select.value)
                 entry.notes = notes_input.value or ""
+
+                # Update links (split by newlines and filter empty)
+                entry.links = [
+                    link.strip()
+                    for link in (links_input.value or "").split("\n")
+                    if link.strip()
+                ]
 
                 # Update subentry time if applicable
                 if subentry and estimated_hours_input is not None:

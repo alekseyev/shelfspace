@@ -1,4 +1,5 @@
 from datetime import date, datetime, time, timedelta
+import re
 
 from beanie import init_beanie
 import typer
@@ -531,6 +532,20 @@ async def process_games():
         elif game["platform"] in ("PC VR", "Meta Quest"):
             game_type = MediaType.GAME_VR
 
+        # Extract Steam ID from Steam links
+        steam_id = None
+        if game_data["steam_links"]:
+            # Steam links look like: https://store.steampowered.com/app/123456/Game_Name/
+            for link in game_data["steam_links"]:
+                match = re.search(r"/app/(\d+)", link)
+                if match:
+                    steam_id = int(match.group(1))
+                    break
+
+        metadata = {"hltb_id": game["hltb_id"]}
+        if steam_id:
+            metadata["steam_id"] = steam_id
+
         entry = Entry(
             type=game_type.value,
             name=game["title"],
@@ -544,7 +559,7 @@ async def process_games():
                 )
             ],
             release_date=game_data["release_date"],
-            metadata={"hltb_id": game["hltb_id"]},
+            metadata=metadata,
             rating=game_data["rating"],
             links=[game["url"]] + game_data["steam_links"],
         )

@@ -570,7 +570,7 @@ async def process_games():
 
 
 @app.async_command()
-async def sync_steam_playtime():
+async def sync_steam_playtime(init_only: bool = False):
     """Sync playtime from Steam for all games with Steam IDs."""
     await init_db()
 
@@ -637,7 +637,7 @@ async def sync_steam_playtime():
         # Calculate difference
         playtime_diff = current_playtime - last_synced_playtime
 
-        if last_synced_playtime:
+        if not init_only:
             # Find or create subentry in current shelf
             current_subentry = None
             for sub in entry.subentries:
@@ -667,7 +667,7 @@ async def sync_steam_playtime():
 
     typer.echo("\n" + "=" * 80)
     typer.echo(
-        f"Added: {added_count} | Updated: {updated_count} | Skipped: {skipped_count}"
+        f"Added: {added_count} | Updated: {updated_count} | No updates: {skipped_count}"
     )
 
 

@@ -140,6 +140,159 @@ def get_all_shelves() -> list[str]:
     return [shelf.name for shelf in shelves]
 
 
+def get_next_shelf(current_shelf: Shelf) -> Shelf | None:
+    """Get the next shelf after the current one (by weight)."""
+    global _shelves_by_name
+    sorted_shelves = sorted(_shelves_by_name.values(), key=lambda s: s.weight)
+
+    for i, shelf in enumerate(sorted_shelves):
+        if shelf.id == current_shelf.id and i < len(sorted_shelves) - 1:
+            return sorted_shelves[i + 1]
+
+    return None
+
+
+def can_finish_shelf(shelf: Shelf, subentries: list[tuple[Entry, SubEntry]]) -> bool:
+    """
+    Check if a shelf can be finished.
+
+    A shelf can be finished if:
+    - Today is on or after the last day of the shelf (based on end_date), OR
+    - All subtasks in the shelf are finished
+    """
+    # Check if all subtasks are finished
+    all_finished = all(subentry.is_finished for _, subentry in subentries)
+    if all_finished:
+        return True
+
+    # Check if we're on or after the last day
+    if shelf.end_date:
+        today = date.today()
+        return today >= shelf.end_date
+
+    # Shelves without end_date (like Backlog, Icebox) can only be finished if all tasks are done
+    return False
+
+
+async def finish_shelf_dialog(shelf: Shelf, shelves_ui: dict) -> None:
+    """Show confirmation dialog before finishing a shelf."""
+    # Count unfinished subentries
+    entries = await Entry.find().to_list()
+    unfinished_count = 0
+    for entry in entries:
+        for subentry in entry.subentries:
+            if subentry.shelf_id == shelf.id and not subentry.is_finished:
+                unfinished_count += 1
+
+    next_shelf = get_next_shelf(shelf)
+    next_shelf_name = next_shelf.name if next_shelf else "Unknown"
+
+    with ui.dialog() as dialog, ui.card().classes("p-4"):
+        ui.label(f"Finish Shelf: {shelf.name}").classes("text-xl font-bold mb-4")
+
+        if unfinished_count > 0:
+            ui.label(
+                f"This shelf has {unfinished_count} unfinished task(s) that will be moved to {next_shelf_name}."
+            ).classes("text-sm mb-2")
+            ui.label(
+                "Tasks with time spent will be marked as finished and recreated in the next shelf with remaining time."
+            ).classes("text-xs text-gray-600 mb-2")
+        else:
+            ui.label("All tasks in this shelf are finished.").classes("text-sm mb-2")
+
+        ui.label("Are you sure you want to finish this shelf?").classes(
+            "text-sm font-semibold mb-4"
+        )
+
+        with ui.row().classes("w-full justify-end gap-2"):
+            ui.button("Cancel", on_click=dialog.close).props("flat")
+
+            async def confirm_finish():
+                dialog.close()
+                await finish_shelf(shelf, shelves_ui)
+
+            ui.button("Finish Shelf", on_click=confirm_finish).props("color=positive")
+
+    dialog.open()
+
+
+async def finish_shelf(shelf: Shelf, shelves_ui: dict) -> None:
+    """
+    Finish a shelf by:
+    1. Setting is_finished to True
+    2. For each unfinished SubEntry:
+       - If time spent: finish it and create new SubEntry in next shelf with remaining time
+       - If no time spent: move SubEntry to next shelf
+    """
+    # Get the next shelf
+    next_shelf = get_next_shelf(shelf)
+    if not next_shelf:
+        ui.notify("No next shelf available to move unfinished tasks", type="warning")
+        return
+
+    # Get all entries with subentries in this shelf
+    entries = await Entry.find().to_list()
+    modified_entries = []
+
+    for entry in entries:
+        modified = False
+        for subentry in entry.subentries:
+            # Only process subentries in this shelf that aren't finished
+            if subentry.shelf_id == shelf.id and not subentry.is_finished:
+                if subentry.spent and subentry.spent > 0:
+                    # There's time spent - finish this subentry and create new one in next shelf
+                    # Save original estimated before modifying
+                    original_estimated = subentry.estimated
+
+                    # Finish current subentry
+                    subentry.is_finished = True
+                    subentry.estimated = subentry.spent
+
+                    # Calculate remaining time (only if there was an original estimate)
+                    if original_estimated and original_estimated > subentry.spent:
+                        remaining_time = original_estimated - subentry.spent
+
+                        # Create new subentry in next shelf with remaining time
+                        new_subentry = SubEntry(
+                            shelf_id=next_shelf.id,
+                            name=subentry.name,
+                            estimated=remaining_time,
+                            spent=0,
+                            is_finished=False,
+                            release_date=subentry.release_date,
+                            metadata=subentry.metadata.copy()
+                            if subentry.metadata
+                            else {},
+                        )
+                        entry.subentries.append(new_subentry)
+
+                    modified = True
+                else:
+                    # No time spent - just move to next shelf
+                    subentry.shelf_id = next_shelf.id
+                    modified = True
+
+        if modified:
+            modified_entries.append(entry)
+
+    # Save all modified entries
+    for entry in modified_entries:
+        await entry.save()
+
+    # Mark shelf as finished
+    shelf.is_finished = True
+    await shelf.save()
+
+    ui.notify(
+        f"Shelf '{shelf.name}' finished. Moved {len(modified_entries)} entries to {next_shelf.name}",
+        type="positive",
+    )
+
+    # Reload shelves and refresh UI
+    await load_shelves()
+    await refresh_all_shelves(shelves_ui)
+
+
 async def update_subentry_shelf(
     entry_id: str, subentry_name: str, new_shelf_name: str, shelves_ui: dict
 ) -> None:
@@ -257,7 +410,7 @@ def build_shelf_content(
 
     with container:
         # Shelf header with totals (more compact)
-        with ui.row().classes("w-full items-baseline gap-3"):
+        with ui.row().classes("w-full items-baseline gap-3 flex-wrap"):
             ui.label(f"📚 {shelf}").classes("text-lg font-semibold")
             ui.label(f"({subentry_count} items)").classes("text-sm text-gray-600")
             ui.label(f"Est: {format_minutes(total_estimated)}").classes(
@@ -266,6 +419,20 @@ def build_shelf_content(
             ui.label(
                 f"Spent: {format_minutes(total_spent) if total_spent else '—'}"
             ).classes("text-sm text-gray-700")
+
+            # Add finish shelf button if shelf can be finished
+            shelf_obj = _shelves_by_name.get(shelf)
+            if shelf_obj and not shelf_obj.is_finished:
+                if can_finish_shelf(shelf_obj, filtered_subentries):
+
+                    async def finish_shelf_handler(s=shelf_obj, ui_ref=shelves_ui):
+                        await finish_shelf_dialog(s, ui_ref)
+
+                    ui.button(
+                        "Finish Shelf",
+                        icon="check_circle",
+                        on_click=finish_shelf_handler,
+                    ).props("dense size=sm color=positive").classes("ml-auto")
 
         # Create the container for this shelf (more compact)
         shelf_container = ui.column().classes(

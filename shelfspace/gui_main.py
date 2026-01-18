@@ -29,6 +29,9 @@ _shelves_by_id: dict = {}
 # Global filter state
 _current_filter: str = "All"
 
+# Global search state
+_current_search: str = ""
+
 # Global view mode state
 _current_view_mode: ViewMode = ViewMode.ACTIVE
 
@@ -65,6 +68,24 @@ def get_filter_categories():
         "Games": [MediaType.GAME, MediaType.GAME_VR, MediaType.GAME_MOBILE],
         "Other": [MediaType.ART, MediaType.VID],
     }
+
+
+def matches_search(entry: Entry, subentry: SubEntry, search_query: str) -> bool:
+    """Check if entry or subentry matches the search query."""
+    if not search_query:
+        return True
+
+    query = search_query.lower()
+    # Search in entry name
+    if query in entry.name.lower():
+        return True
+    # Search in subentry name
+    if subentry.name and query in subentry.name.lower():
+        return True
+    # Search in notes
+    if entry.notes and query in entry.notes.lower():
+        return True
+    return False
 
 
 def matches_filter(entry: Entry, filter_category: str) -> bool:
@@ -127,7 +148,7 @@ def filter_shelves_by_view_mode(
     return shelves
 
 
-async def load_shelves() -> None:
+async def load_shelves(ignore_view_mode: bool = False) -> None:
     """Load shelves into global cache based on current view mode."""
     global _shelves_by_name, _shelves_by_id, _current_view_mode
     await AppCtx.ensure_initialized()
@@ -139,8 +160,11 @@ async def load_shelves() -> None:
     _shelves_by_id = {shelf.id: shelf for shelf in all_shelves}
     Shelf._shelves_dict = _shelves_by_id
 
-    # Filter shelves based on view mode
-    filtered_shelves = filter_shelves_by_view_mode(all_shelves, _current_view_mode)
+    # Filter shelves based on view mode (unless searching)
+    if ignore_view_mode:
+        filtered_shelves = all_shelves
+    else:
+        filtered_shelves = filter_shelves_by_view_mode(all_shelves, _current_view_mode)
 
     # Build name -> shelf mapping
     _shelves_by_name = {shelf.name: shelf for shelf in filtered_shelves}
@@ -152,8 +176,9 @@ async def load_subentries() -> dict[str, list[tuple[Entry, SubEntry]]]:
 
     Returns a dict mapping shelf names to lists of (entry, subentry) tuples.
     """
-    global _current_view_mode
-    await load_shelves()
+    global _current_view_mode, _current_search
+    # When searching, load all shelves regardless of view mode
+    await load_shelves(ignore_view_mode=bool(_current_search))
     entries = await Entry.find().to_list()
 
     # Group subentries by shelf name (resolved via shelf_id)
@@ -443,14 +468,19 @@ def build_shelf_content(
     container,
 ) -> None:
     """Build the content for a shelf container."""
-    global _current_filter
+    global _current_filter, _current_search
 
-    # Apply filter
+    # Apply filter and search
     filtered_subentries = [
         (entry, sub)
         for entry, sub in subentries
         if matches_filter(entry, _current_filter)
+        and matches_search(entry, sub, _current_search)
     ]
+
+    # Don't show empty shelves when searching
+    if _current_search and not filtered_subentries:
+        return
 
     subentry_count = len(filtered_subentries)
 
@@ -470,19 +500,20 @@ def build_shelf_content(
                 f"Spent: {format_minutes(total_spent) if total_spent else '—'}"
             ).classes("text-sm text-gray-700")
 
-            # Add finish shelf button if shelf can be finished
-            shelf_obj = _shelves_by_name.get(shelf)
-            if shelf_obj and not shelf_obj.is_finished:
-                if can_finish_shelf(shelf_obj, filtered_subentries):
+            # Add finish shelf button if shelf can be finished (not when searching)
+            if not _current_search:
+                shelf_obj = _shelves_by_name.get(shelf)
+                if shelf_obj and not shelf_obj.is_finished:
+                    if can_finish_shelf(shelf_obj, filtered_subentries):
 
-                    async def finish_shelf_handler(s=shelf_obj, ui_ref=shelves_ui):
-                        await finish_shelf_dialog(s, ui_ref)
+                        async def finish_shelf_handler(s=shelf_obj, ui_ref=shelves_ui):
+                            await finish_shelf_dialog(s, ui_ref)
 
-                    ui.button(
-                        "Finish Shelf",
-                        icon="check_circle",
-                        on_click=finish_shelf_handler,
-                    ).props("dense size=sm color=positive").classes("ml-auto")
+                        ui.button(
+                            "Finish Shelf",
+                            icon="check_circle",
+                            on_click=finish_shelf_handler,
+                        ).props("dense size=sm color=positive").classes("ml-auto")
 
         # Create the container for this shelf (more compact)
         shelf_container = ui.column().classes(
@@ -1262,51 +1293,88 @@ async def setup_ui():
                     on_click=lambda: add_entry_dialog(_shelves_ui_ref),
                 ).props("color=primary")
 
-        # View mode selector
-        with ui.row().classes("w-full gap-2 mb-2 flex-wrap"):
-            ui.label("View:").classes("text-sm font-medium")
+        # View mode selector (hidden when searching)
+        if not _current_search:
+            with ui.row().classes("w-full gap-2 mb-2 flex-wrap"):
+                ui.label("View:").classes("text-sm font-medium")
 
-            async def apply_view_mode(mode: ViewMode):
-                global _current_view_mode
-                _current_view_mode = mode
+                async def apply_view_mode(mode: ViewMode):
+                    global _current_view_mode
+                    _current_view_mode = mode
 
-                # Rebuild entire UI with new view mode
-                ui.navigate.to("/")
+                    # Rebuild entire UI with new view mode
+                    ui.navigate.to("/")
 
-            with ui.row().classes("gap-2"):
-                for mode in ViewMode:
-                    is_active = mode == _current_view_mode
+                with ui.row().classes("gap-2"):
+                    for mode in ViewMode:
+                        is_active = mode == _current_view_mode
 
-                    ui.button(
-                        mode.value,
-                        on_click=lambda m=mode: apply_view_mode(m),
-                    ).props(
-                        f"{'unelevated' if is_active else 'outline'} dense size=sm"
-                    ).classes(f"{'bg-secondary text-white' if is_active else ''}")
+                        ui.button(
+                            mode.value,
+                            on_click=lambda m=mode: apply_view_mode(m),
+                        ).props(
+                            f"{'unelevated' if is_active else 'outline'} dense size=sm"
+                        ).classes(f"{'bg-secondary text-white' if is_active else ''}")
 
-        # Filter bar
-        with ui.row().classes("w-full gap-2 mb-4 flex-wrap"):
-            ui.label("Filter:").classes("text-sm font-medium")
+        # Filter bar (hidden when searching)
+        if not _current_search:
+            with ui.row().classes("w-full gap-2 mb-4 flex-wrap"):
+                ui.label("Filter:").classes("text-sm font-medium")
 
-            filter_categories = list(get_filter_categories().keys())
+                filter_categories = list(get_filter_categories().keys())
 
-            async def apply_filter(category: str):
-                global _current_filter
-                _current_filter = category
+                async def apply_filter(category: str):
+                    global _current_filter
+                    _current_filter = category
 
-                # Refresh all shelves with new filter
-                await refresh_all_shelves(_shelves_ui_ref)
+                    # Refresh all shelves with new filter
+                    await refresh_all_shelves(_shelves_ui_ref)
 
-            with ui.row().classes("gap-2"):
-                for category in filter_categories:
-                    is_active = category == _current_filter
+                with ui.row().classes("gap-2"):
+                    for category in filter_categories:
+                        is_active = category == _current_filter
 
-                    ui.button(
-                        category,
-                        on_click=lambda cat=category: apply_filter(cat),
-                    ).props(
-                        f"{'unelevated' if is_active else 'outline'} dense size=sm"
-                    ).classes(f"{'bg-primary text-white' if is_active else ''}")
+                        ui.button(
+                            category,
+                            on_click=lambda cat=category: apply_filter(cat),
+                        ).props(
+                            f"{'unelevated' if is_active else 'outline'} dense size=sm"
+                        ).classes(f"{'bg-primary text-white' if is_active else ''}")
+
+        # Search bar
+        with ui.row().classes("w-full gap-2 mb-4 items-center"):
+            ui.label("Search:").classes("text-sm font-medium")
+
+            async def apply_search(e):
+                global _current_search
+                was_searching = bool(_current_search)
+                _current_search = e.value or ""
+                is_searching = bool(_current_search)
+
+                # Only rebuild page when clearing search (to show view mode/filter again)
+                # When starting to search, just refresh shelves to avoid losing focus
+                if was_searching and not is_searching:
+                    ui.navigate.to("/")
+                else:
+                    await refresh_all_shelves(_shelves_ui_ref)
+
+            search_input = (
+                ui.input(
+                    placeholder="Search entries... (/ or . to focus)",
+                    value=_current_search,
+                    on_change=apply_search,
+                )
+                .props("outlined dense clearable")
+                .classes("flex-1 max-w-md")
+            )
+
+            # Keyboard shortcuts to focus search
+            ui.keyboard(
+                on_key=lambda e: search_input.run_method("focus")
+                if e.key in ["/", "."] and not e.action.repeat
+                else None,
+                ignore=["input", "textarea"],
+            )
 
         if not subentries_by_shelf:
             ui.label("No entries found.").classes("text-base text-gray-500")

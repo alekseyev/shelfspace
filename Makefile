@@ -14,8 +14,9 @@ run: ## Run the application
 	. .venv/bin/activate
 	SET_DEBUG=1 python -m shelfspace.gui_main
 
-process-trakt: ## Sync all the things
+process-apis: ## Sync playtime and process Trakt data
 	. .venv/bin/activate
+	python shelf.py sync-steam-playtime
 	python shelf.py process-movies
 	python shelf.py process-shows
 	python shelf.py process-upcoming
@@ -24,6 +25,7 @@ process-trakt: ## Sync all the things
 
 process-all: ## Sync all the things
 	. .venv/bin/activate
+	python shelf.py sync-steam-playtime
 	python shelf.py process-movies
 	python shelf.py process-shows
 	python shelf.py process-upcoming

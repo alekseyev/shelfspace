@@ -336,9 +336,6 @@ async def process_upcoming(days: int = 49):
                 sub.shelf_id == icebox_shelf.id for sub in existing_entry.subentries
             )
 
-            # Find existing episode numbers
-            existing_ep_names = {sub.name for sub in existing_entry.subentries}
-
             # Update existing episodes in Backlog to appropriate dated shelves
             for sub in existing_entry.subentries:
                 if sub.shelf_id == backlog_shelf.id and sub.release_date:
@@ -351,11 +348,32 @@ async def process_upcoming(days: int = 49):
                         )
                         updated_count += 1
 
-            # Add missing episodes
+            # Add missing episodes or update runtime of existing ones
             entry_added_count = 0
+            entry_updated_count = 0
             for ep in season_data["episodes"]:
                 ep_name = f"S{season_number:02d}E{ep['episode']:02d}"
-                if ep_name in existing_ep_names:
+                api_runtime = ep["runtime"]
+
+                # Check if episode already exists
+                existing_sub = None
+                for sub in existing_entry.subentries:
+                    if sub.name == ep_name:
+                        existing_sub = sub
+                        break
+
+                if existing_sub:
+                    # Update runtime if missing or different
+                    if api_runtime and existing_sub.estimated != api_runtime:
+                        old_runtime = existing_sub.estimated
+                        existing_sub.estimated = api_runtime
+                        typer.echo(
+                            f"Updated {show_title} {ep_name} runtime: "
+                            f"{format_minutes(old_runtime) if old_runtime else 'N/A'} -> "
+                            f"{format_minutes(api_runtime)}"
+                        )
+                        entry_updated_count += 1
+                        updated_count += 1
                     continue
 
                 release_date = None
@@ -372,7 +390,7 @@ async def process_upcoming(days: int = 49):
                 new_subentry = SubEntry(
                     shelf_id=shelf_id,
                     name=ep_name,
-                    estimated=ep["runtime"],
+                    estimated=api_runtime,
                     release_date=release_date,
                 )
                 existing_entry.subentries.append(new_subentry)
@@ -380,7 +398,7 @@ async def process_upcoming(days: int = 49):
                 entry_added_count += 1
                 added_count += 1
 
-            if entry_added_count > 0 or updated_count > 0:
+            if entry_added_count > 0 or entry_updated_count > 0:
                 await existing_entry.save()
         else:
             # Entry doesn't exist - check if show has ANY season in Icebox
@@ -1064,8 +1082,8 @@ async def _process_watched_episode(
 
     if not episode_sub.is_finished:
         episode_sub.is_finished = True
-        if episode_sub.estimated:
-            episode_sub.spent = episode_sub.estimated
+        episode_sub.estimated = episode_data["runtime"]
+        episode_sub.spent = episode_sub.estimated
         typer.echo(f"✓ Marked '{entry.name} {ep_name}' as finished")
         changed = True
 

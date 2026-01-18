@@ -99,6 +99,63 @@ def matches_filter(entry: Entry, filter_category: str) -> bool:
     return entry.type in media_types
 
 
+def get_shelf_time_display(
+    shelf_obj: Shelf | None, estimated: int | None, spent: int | None
+) -> str:
+    """
+    Get time display string based on shelf type.
+    - Past shelves: only spent (⏱️)
+    - Future shelves (start_date > today) or no-date shelves: only estimated (⏳)
+    - Current shelves: spent/estimated together (⏱️)
+    """
+    today = date.today()
+
+    # Determine shelf type
+    is_past = False
+    is_future = False
+
+    if shelf_obj:
+        if shelf_obj.end_date and shelf_obj.end_date < today:
+            is_past = True
+        elif shelf_obj.start_date and shelf_obj.start_date > today:
+            is_future = True
+        elif not shelf_obj.start_date and not shelf_obj.end_date:
+            # No-date shelves (Backlog, Icebox) - treat as future (show estimated)
+            is_future = True
+
+    spent_str = format_minutes(spent) if spent else "0m"
+    est_str = format_minutes(estimated) if estimated else "?"
+
+    if is_past:
+        return f"⏱️ {spent_str}"
+    elif is_future:
+        return f"⏳ {est_str}"
+    else:
+        # Current shelf - show both
+        return f"⏱️ {spent_str}/{est_str}"
+
+
+def format_release_date(release_date: date | None) -> str | None:
+    """
+    Format release date for display with 📅 emoji.
+    - None: return None (don't display)
+    - Future or within 2 weeks: show full date
+    - Otherwise: show just year
+    """
+    if not release_date:
+        return None
+
+    today = date.today()
+    two_weeks_ago = today - timedelta(days=14)
+
+    if release_date > today or release_date >= two_weeks_ago:
+        # Future or within last 2 weeks - show full date
+        return f"📅 {release_date.strftime('%d %b %Y')}"
+    else:
+        # Past - show just year
+        return f"📅 {release_date.year}"
+
+
 def get_media_type_order(media_type: MediaType) -> int:
     """Get the sort order for a media type based on MediaType enum definition."""
     order = [
@@ -488,21 +545,19 @@ def build_shelf_content(
     total_estimated = sum(sub.estimated or 0 for _, sub in filtered_subentries)
     total_spent = sum(sub.spent or 0 for _, sub in filtered_subentries)
 
+    # Get shelf object for time display formatting
+    shelf_obj = _shelves_by_name.get(shelf)
+    time_display = get_shelf_time_display(shelf_obj, total_estimated, total_spent)
+
     with container:
         # Shelf header with totals (more compact)
         with ui.row().classes("w-full items-baseline gap-3 flex-wrap"):
             ui.label(f"📚 {shelf}").classes("text-lg font-semibold")
             ui.label(f"({subentry_count} items)").classes("text-sm text-gray-600")
-            ui.label(f"Est: {format_minutes(total_estimated)}").classes(
-                "text-sm text-gray-700"
-            )
-            ui.label(
-                f"Spent: {format_minutes(total_spent) if total_spent else '—'}"
-            ).classes("text-sm text-gray-700")
+            ui.label(time_display).classes("text-sm text-gray-700")
 
             # Add finish shelf button if shelf can be finished (not when searching)
             if not _current_search:
-                shelf_obj = _shelves_by_name.get(shelf)
                 if shelf_obj and not shelf_obj.is_finished:
                     if can_finish_shelf(shelf_obj, filtered_subentries):
 
@@ -563,26 +618,28 @@ def build_shelf_content(
 
 def create_subentry_card(entry: Entry, subentry: SubEntry, shelves_ui: dict) -> None:
     """Create a card for a single subentry with shelf selector."""
-    global _current_view_mode
+    global _current_view_mode, _shelves_by_name
     is_finished = subentry.is_finished
     card_classes = "w-full p-2"
     # Only grey out finished entries if NOT in Finished view mode
     if is_finished and _current_view_mode != ViewMode.FINISHED:
         card_classes += " opacity-60 bg-gray-100"
 
+    # Get shelf object for time display formatting
+    shelf_obj = _shelves_by_name.get(subentry.shelf_name)
+
     with ui.card().classes(card_classes):
         with ui.row().classes("w-full items-start justify-between gap-2"):
             with ui.column().classes("flex-1 gap-1"):
                 emoji = get_emoji_for_type(entry.type)
-                year = entry.release_date.year if entry.release_date else "N/A"
                 subentry_name = subentry.name or entry.name
 
-                estimated_formatted = (
-                    format_minutes(subentry.estimated) if subentry.estimated else "N/A"
+                # Format time display based on shelf type
+                time_display = get_shelf_time_display(
+                    shelf_obj, subentry.estimated, subentry.spent
                 )
-                spent_formatted = (
-                    format_minutes(subentry.spent) if subentry.spent else "—"
-                )
+                # Format release date
+                date_display = format_release_date(entry.release_date)
                 rating_str = f"⭐ {entry.rating}" if entry.rating else ""
 
                 with ui.row().classes("items-center gap-2"):
@@ -637,10 +694,12 @@ def create_subentry_card(entry: Entry, subentry: SubEntry, shelves_ui: dict) -> 
                         ).tooltip("Copy to next shelf")
 
                 with ui.row().classes("gap-3 text-xs flex-wrap"):
-                    ui.label(f"Year: {year}")
-                    ui.label(f"Est: {estimated_formatted}")
-                    ui.label(f"Spent: {spent_formatted}")
-                    ui.label(rating_str)
+                    # Order: time, date, rating
+                    ui.label(time_display)
+                    if date_display:
+                        ui.label(date_display)
+                    if rating_str:
+                        ui.label(rating_str)
                 if entry.notes:
                     ui.label(f"Notes: {entry.notes}").classes(
                         "text-xs text-gray-600 italic"
@@ -673,7 +732,7 @@ def create_grouped_entry_card(
     entry: Entry, subentries: list[SubEntry], shelves_ui: dict
 ) -> None:
     """Create a card for an entry with multiple subentries grouped together."""
-    global _current_view_mode
+    global _current_view_mode, _shelves_by_name
     # Calculate totals for the entry
     total_estimated = sum(s.estimated or 0 for s in subentries)
     total_spent = sum(s.spent or 0 for s in subentries)
@@ -683,6 +742,7 @@ def create_grouped_entry_card(
 
     # Get current shelf name (all subentries should be on the same shelf in this view)
     current_shelf_name = subentries[0].shelf_name if subentries else "Backlog"
+    shelf_obj = _shelves_by_name.get(current_shelf_name)
 
     # Count episodes on current shelf vs total
     episodes_on_shelf = len(subentries)
@@ -699,13 +759,17 @@ def create_grouped_entry_card(
     if is_finished and _current_view_mode != ViewMode.FINISHED:
         card_classes += " opacity-60 bg-gray-100"
 
+    # Format time display based on shelf type
+    time_display = get_shelf_time_display(shelf_obj, total_estimated, total_spent)
+    # Format release date
+    date_display = format_release_date(entry.release_date)
+    rating_str = f"⭐ {entry.rating}" if entry.rating else ""
+
     with ui.card().classes(card_classes):
         # Entry header with expand/collapse
         with ui.row().classes("w-full items-start justify-between"):
             with ui.column().classes("flex-1 gap-0"):
                 emoji = get_emoji_for_type(entry.type)
-                year = entry.release_date.year if entry.release_date else "N/A"
-                rating_str = f"⭐ {entry.rating}" if entry.rating else ""
 
                 # Will hold reference to episodes container and button for toggle
                 episodes_container = None
@@ -735,12 +799,12 @@ def create_grouped_entry_card(
                     )
 
                 with ui.row().classes("gap-3 text-xs flex-wrap"):
-                    ui.label(f"Year: {year}")
-                    ui.label(rating_str)
-                    ui.label(
-                        f"Total Spent: {format_minutes(total_spent) if total_spent else '—'}"
-                    )
-                    ui.label(f"Total Est: {format_minutes(total_estimated)}")
+                    # Order: time, date, rating, episodes
+                    ui.label(time_display)
+                    if date_display:
+                        ui.label(date_display)
+                    if rating_str:
+                        ui.label(rating_str)
                     ui.label(f"Episodes: {episode_count_str}")
                 if entry.notes:
                     ui.label(f"Notes: {entry.notes}").classes(
@@ -783,6 +847,11 @@ def create_grouped_entry_card(
 
 def create_subentry_row(entry: Entry, subentry: SubEntry, shelves_ui: dict) -> None:
     """Create a row for a subentry within a grouped entry."""
+    global _shelves_by_name
+
+    # Get shelf object for time display formatting
+    shelf_obj = _shelves_by_name.get(subentry.shelf_name)
+
     # Create container for the subentry
     with ui.row().classes(
         "w-full items-center justify-between px-1 py-0.5 hover:bg-gray-100 rounded"
@@ -790,21 +859,20 @@ def create_subentry_row(entry: Entry, subentry: SubEntry, shelves_ui: dict) -> N
         # Subentry info
         with ui.row().classes("flex-1 gap-2 items-center flex-wrap"):
             subentry_name = subentry.name or entry.name
-            estimated_formatted = (
-                format_minutes(subentry.estimated) if subentry.estimated else "N/A"
-            )
-            spent_formatted = format_minutes(subentry.spent) if subentry.spent else "—"
             status_str = "✓" if subentry.is_finished else "○"
 
-            # Format release date
-            release_date_str = "—"
-            if subentry.release_date:
-                release_date_str = subentry.release_date.strftime("%Y-%m-%d")
+            # Format time display based on shelf type
+            time_display = get_shelf_time_display(
+                shelf_obj, subentry.estimated, subentry.spent
+            )
+
+            # Format release date for subentry
+            release_date_str = format_release_date(subentry.release_date)
 
             ui.label(f"{status_str} {subentry_name}").classes("text-xs font-medium")
-            ui.label(f"Released: {release_date_str}").classes("text-xs text-gray-600")
-            ui.label(f"Spent: {spent_formatted}").classes("text-xs text-gray-600")
-            ui.label(f"Est: {estimated_formatted}").classes("text-xs text-gray-600")
+            ui.label(time_display).classes("text-xs text-gray-600")
+            if release_date_str:
+                ui.label(release_date_str).classes("text-xs text-gray-600")
 
         # Shelf selector dropdown (only show if not finished)
         if not subentry.is_finished:

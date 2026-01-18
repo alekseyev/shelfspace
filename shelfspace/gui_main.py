@@ -1,4 +1,5 @@
-from datetime import date
+from datetime import date, timedelta
+from enum import Enum
 from nicegui import app, ui
 from nicegui.events import ValueChangeEventArguments
 
@@ -11,6 +12,13 @@ from shelfspace.utils import format_minutes
 REQUIRED_SHELVES = ["Backlog", "Icebox"]
 DEFAULT_SHELF = "Icebox"
 
+
+class ViewMode(str, Enum):
+    FINISHED = "Finished"
+    ACTIVE = "Active"
+    PLANNING = "Planning"
+
+
 # Global reference to shelves_ui for drag-drop handling
 _shelves_ui_ref: dict = {}
 
@@ -20,6 +28,9 @@ _shelves_by_id: dict = {}
 
 # Global filter state
 _current_filter: str = "All"
+
+# Global view mode state
+_current_view_mode: ViewMode = ViewMode.ACTIVE
 
 
 def get_emoji_for_type(media_type):
@@ -89,18 +100,50 @@ def get_media_type_order(media_type: MediaType) -> int:
         return 999  # Unknown types go to the end
 
 
+def is_dated_shelf(shelf: Shelf) -> bool:
+    """Check if a shelf has dates (not Backlog/Icebox/Upcoming)."""
+    return shelf.start_date is not None and shelf.end_date is not None
+
+
+def filter_shelves_by_view_mode(
+    shelves: list[Shelf], view_mode: ViewMode
+) -> list[Shelf]:
+    """Filter shelves based on view mode."""
+    if view_mode == ViewMode.FINISHED:
+        # Show only finished shelves
+        return [s for s in shelves if s.is_finished]
+    elif view_mode == ViewMode.ACTIVE:
+        # Show non-finished dated shelves + Backlog (not Icebox)
+        return [
+            s
+            for s in shelves
+            if not s.is_finished and (is_dated_shelf(s) or s.name == "Backlog")
+        ]
+    elif view_mode == ViewMode.PLANNING:
+        # Show only Backlog + Icebox (non-finished)
+        return [
+            s for s in shelves if not s.is_finished and s.name in ["Backlog", "Icebox"]
+        ]
+    return shelves
+
+
 async def load_shelves() -> None:
-    """Load shelves into global cache."""
-    global _shelves_by_name, _shelves_by_id
+    """Load shelves into global cache based on current view mode."""
+    global _shelves_by_name, _shelves_by_id, _current_view_mode
     await AppCtx.ensure_initialized()
 
-    # Load shelves using the Shelf model's helper to enable shelf_name property
-    _shelves_by_id = await Shelf.get_shelves_dict()
+    # Load ALL shelves (both finished and not finished)
+    all_shelves = await Shelf.find().to_list()
 
-    # Also build name -> shelf mapping§
-    _shelves_by_name = {
-        shelf.name: shelf for shelf in _shelves_by_id.values() if not shelf.is_finished
-    }
+    # Build shelves_by_id dict for shelf_name property lookup
+    _shelves_by_id = {shelf.id: shelf for shelf in all_shelves}
+    Shelf._shelves_dict = _shelves_by_id
+
+    # Filter shelves based on view mode
+    filtered_shelves = filter_shelves_by_view_mode(all_shelves, _current_view_mode)
+
+    # Build name -> shelf mapping
+    _shelves_by_name = {shelf.name: shelf for shelf in filtered_shelves}
 
 
 async def load_subentries() -> dict[str, list[tuple[Entry, SubEntry]]]:
@@ -109,6 +152,7 @@ async def load_subentries() -> dict[str, list[tuple[Entry, SubEntry]]]:
 
     Returns a dict mapping shelf names to lists of (entry, subentry) tuples.
     """
+    global _current_view_mode
     await load_shelves()
     entries = await Entry.find().to_list()
 
@@ -123,10 +167,10 @@ async def load_subentries() -> dict[str, list[tuple[Entry, SubEntry]]]:
                 subentries_by_shelf[shelf_name] = []
             subentries_by_shelf[shelf_name].append((entry, subentry))
 
-    # Ensure required shelves are present (even if empty)
-    for shelf in REQUIRED_SHELVES:
-        if shelf not in subentries_by_shelf:
-            subentries_by_shelf[shelf] = []
+    # Ensure shelves visible in current view mode are present (even if empty)
+    for shelf_name in _shelves_by_name:
+        if shelf_name not in subentries_by_shelf:
+            subentries_by_shelf[shelf_name] = []
 
     return subentries_by_shelf
 
@@ -157,9 +201,16 @@ def can_finish_shelf(shelf: Shelf, subentries: list[tuple[Entry, SubEntry]]) -> 
     Check if a shelf can be finished.
 
     A shelf can be finished if:
+    - The shelf has already started (start_date <= today), AND
     - Today is on or after the last day of the shelf (based on end_date), OR
     - All subtasks in the shelf are finished
     """
+    today = date.today()
+
+    # Don't allow finishing shelves that haven't started yet
+    if shelf.start_date and shelf.start_date > today:
+        return False
+
     # Check if all subtasks are finished
     all_finished = all(subentry.is_finished for _, subentry in subentries)
     if all_finished:
@@ -167,7 +218,6 @@ def can_finish_shelf(shelf: Shelf, subentries: list[tuple[Entry, SubEntry]]) -> 
 
     # Check if we're on or after the last day
     if shelf.end_date:
-        today = date.today()
         return today >= shelf.end_date
 
     # Shelves without end_date (like Backlog, Icebox) can only be finished if all tasks are done
@@ -482,9 +532,11 @@ def build_shelf_content(
 
 def create_subentry_card(entry: Entry, subentry: SubEntry, shelves_ui: dict) -> None:
     """Create a card for a single subentry with shelf selector."""
+    global _current_view_mode
     is_finished = subentry.is_finished
     card_classes = "w-full p-2"
-    if is_finished:
+    # Only grey out finished entries if NOT in Finished view mode
+    if is_finished and _current_view_mode != ViewMode.FINISHED:
         card_classes += " opacity-60 bg-gray-100"
 
     with ui.card().classes(card_classes):
@@ -590,6 +642,7 @@ def create_grouped_entry_card(
     entry: Entry, subentries: list[SubEntry], shelves_ui: dict
 ) -> None:
     """Create a card for an entry with multiple subentries grouped together."""
+    global _current_view_mode
     # Calculate totals for the entry
     total_estimated = sum(s.estimated or 0 for s in subentries)
     total_spent = sum(s.spent or 0 for s in subentries)
@@ -611,7 +664,8 @@ def create_grouped_entry_card(
         episode_count_str += f" ({total_episodes} total)"
 
     card_classes = "w-full p-2"
-    if is_finished:
+    # Only grey out finished entries if NOT in Finished view mode
+    if is_finished and _current_view_mode != ViewMode.FINISHED:
         card_classes += " opacity-60 bg-gray-100"
 
     with ui.card().classes(card_classes):
@@ -817,6 +871,103 @@ async def add_entry_dialog(shelves_ui: dict) -> None:
                 await refresh_all_shelves(shelves_ui)
 
             ui.button("Save", on_click=save_new_entry).props("color=primary")
+
+    dialog.open()
+
+
+async def add_shelf_dialog() -> None:
+    """Show dialog to add a new shelf."""
+    # Find the last dated shelf to calculate default start date
+    all_shelves = await Shelf.find().to_list()
+    dated_shelves = [s for s in all_shelves if s.end_date is not None]
+
+    default_start = ""
+    if dated_shelves:
+        # Find the shelf with the latest end_date
+        latest_shelf = max(dated_shelves, key=lambda s: s.end_date)
+        default_start = (latest_shelf.end_date + timedelta(days=1)).isoformat()
+
+    # Calculate default end date (start + 6 days)
+    default_end = ""
+    if default_start:
+        default_end = (
+            date.fromisoformat(default_start) + timedelta(days=6)
+        ).isoformat()
+
+    with ui.dialog() as dialog, ui.card().classes("p-4 min-w-[350px]"):
+        ui.label("Add New Shelf").classes("text-xl font-bold mb-4")
+
+        # Form inputs
+        with ui.row().classes("w-full gap-2"):
+
+            def on_start_date_change(e):
+                """Update end date when start date changes."""
+                if e.value:
+                    try:
+                        new_end = date.fromisoformat(e.value) + timedelta(days=6)
+                        end_date_input.set_value(new_end.isoformat())
+                    except ValueError:
+                        pass
+
+            start_date_input = (
+                ui.input(
+                    "Start Date", value=default_start, on_change=on_start_date_change
+                )
+                .props("outlined dense type=date")
+                .classes("flex-1")
+            )
+            end_date_input = (
+                ui.input("End Date", value=default_end)
+                .props("outlined dense type=date")
+                .classes("flex-1")
+            )
+
+        ui.label(
+            "Shelf name will be auto-generated from dates (e.g., '15 January - 22 January 2025')"
+        ).classes("text-xs text-gray-600 mt-1")
+
+        description_input = (
+            ui.textarea("Description (optional)")
+            .props("outlined dense")
+            .classes("w-full")
+        )
+
+        # Action buttons
+        with ui.row().classes("w-full justify-end gap-2 mt-4"):
+            ui.button("Cancel", on_click=dialog.close).props("flat")
+
+            async def save_new_shelf():
+                if not start_date_input.value or not end_date_input.value:
+                    ui.notify("Start and end dates are required", type="negative")
+                    return
+
+                # Parse dates
+                try:
+                    start = date.fromisoformat(start_date_input.value)
+                    end = date.fromisoformat(end_date_input.value)
+                except ValueError:
+                    ui.notify("Invalid date format", type="negative")
+                    return
+
+                if end < start:
+                    ui.notify("End date must be after start date", type="negative")
+                    return
+
+                # Create shelf (name and weight auto-generated on save)
+                shelf = Shelf(
+                    start_date=start,
+                    end_date=end,
+                    description=description_input.value or "",
+                )
+
+                await shelf.save()
+                ui.notify(f"Shelf '{shelf.name}' created successfully", type="positive")
+                dialog.close()
+
+                # Rebuild UI to show new shelf
+                ui.navigate.to("/")
+
+            ui.button("Save", on_click=save_new_shelf).props("color=primary")
 
     dialog.open()
 
@@ -1092,18 +1243,46 @@ async def refresh_all_shelves(shelves_ui: dict) -> None:
 
 async def setup_ui():
     """Setup the main UI with all subentries grouped by shelf."""
-    global _shelves_ui_ref, _current_filter
+    global _shelves_ui_ref, _current_filter, _current_view_mode
     subentries_by_shelf = await load_subentries()
 
     with ui.column().classes("w-full max-w-6xl mx-auto p-3"):
-        # Header with title and add button
+        # Header with title and add buttons
         with ui.row().classes("w-full items-center justify-between mb-4"):
             ui.label("📚 All Entries").classes("text-2xl font-bold")
-            ui.button(
-                "Add Entry",
-                icon="add",
-                on_click=lambda: add_entry_dialog(_shelves_ui_ref),
-            ).props("color=primary")
+            with ui.row().classes("gap-2"):
+                ui.button(
+                    "Add Shelf",
+                    icon="date_range",
+                    on_click=add_shelf_dialog,
+                ).props("color=secondary outline")
+                ui.button(
+                    "Add Entry",
+                    icon="add",
+                    on_click=lambda: add_entry_dialog(_shelves_ui_ref),
+                ).props("color=primary")
+
+        # View mode selector
+        with ui.row().classes("w-full gap-2 mb-2 flex-wrap"):
+            ui.label("View:").classes("text-sm font-medium")
+
+            async def apply_view_mode(mode: ViewMode):
+                global _current_view_mode
+                _current_view_mode = mode
+
+                # Rebuild entire UI with new view mode
+                ui.navigate.to("/")
+
+            with ui.row().classes("gap-2"):
+                for mode in ViewMode:
+                    is_active = mode == _current_view_mode
+
+                    ui.button(
+                        mode.value,
+                        on_click=lambda m=mode: apply_view_mode(m),
+                    ).props(
+                        f"{'unelevated' if is_active else 'outline'} dense size=sm"
+                    ).classes(f"{'bg-secondary text-white' if is_active else ''}")
 
         # Filter bar
         with ui.row().classes("w-full gap-2 mb-4 flex-wrap"):
@@ -1118,15 +1297,16 @@ async def setup_ui():
                 # Refresh all shelves with new filter
                 await refresh_all_shelves(_shelves_ui_ref)
 
-            for category in filter_categories:
-                is_active = category == _current_filter
+            with ui.row().classes("gap-2"):
+                for category in filter_categories:
+                    is_active = category == _current_filter
 
-                ui.button(
-                    category,
-                    on_click=lambda cat=category: apply_filter(cat),
-                ).props(
-                    f"{'unelevated' if is_active else 'outline'} dense size=sm"
-                ).classes(f"{'bg-primary text-white' if is_active else ''}")
+                    ui.button(
+                        category,
+                        on_click=lambda cat=category: apply_filter(cat),
+                    ).props(
+                        f"{'unelevated' if is_active else 'outline'} dense size=sm"
+                    ).classes(f"{'bg-primary text-white' if is_active else ''}")
 
         if not subentries_by_shelf:
             ui.label("No entries found.").classes("text-base text-gray-500")
@@ -1139,6 +1319,8 @@ async def setup_ui():
                 key=lambda x: _shelves_by_name[x].weight
                 if x in _shelves_by_name
                 else 999999,
+                # Reverse for finished mode (newest on top = highest weight first)
+                reverse=(_current_view_mode == ViewMode.FINISHED),
             )
 
             # Create containers for each shelf that we can update

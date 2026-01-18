@@ -550,11 +550,11 @@ def build_shelf_content(
     time_display = get_shelf_time_display(shelf_obj, total_estimated, total_spent)
 
     with container:
-        # Shelf header with totals (more compact)
-        with ui.row().classes("w-full items-baseline gap-3 flex-wrap"):
-            ui.label(f"📚 {shelf}").classes("text-lg font-semibold")
-            ui.label(f"({subentry_count} items)").classes("text-sm text-gray-600")
-            ui.label(time_display).classes("text-sm text-gray-700")
+        # Shelf header with totals (compact)
+        with ui.row().classes("w-full items-center gap-2 flex-wrap"):
+            ui.label(f"📚 {shelf}").classes("text-base font-semibold")
+            ui.label(f"({subentry_count})").classes("text-xs text-gray-500")
+            ui.label(time_display).classes("text-xs text-gray-600")
 
             # Add finish shelf button if shelf can be finished (not when searching)
             if not _current_search:
@@ -565,20 +565,20 @@ def build_shelf_content(
                             await finish_shelf_dialog(s, ui_ref)
 
                         ui.button(
-                            "Finish Shelf",
+                            "Finish",
                             icon="check_circle",
                             on_click=finish_shelf_handler,
-                        ).props("dense size=sm color=positive").classes("ml-auto")
+                        ).props("dense size=xs color=positive").classes("ml-auto")
 
-        # Create the container for this shelf (more compact)
+        # Create the container for this shelf (compact)
         shelf_container = ui.column().classes(
-            "w-full p-2 border-2 border-gray-300 rounded-lg bg-gray-50 gap-1 min-h-[60px]"
+            "w-full p-1 border border-gray-300 rounded bg-gray-50 gap-0"
         )
 
         with shelf_container:
             if not filtered_subentries:
                 ui.label("No entries").classes(
-                    "text-center text-gray-400 py-2 italic w-full text-sm"
+                    "text-center text-gray-400 py-1 italic w-full text-xs"
                 )
             else:
                 # Group subentries by entry
@@ -620,7 +620,7 @@ def create_subentry_card(entry: Entry, subentry: SubEntry, shelves_ui: dict) -> 
     """Create a card for a single subentry with shelf selector."""
     global _current_view_mode, _shelves_by_name
     is_finished = subentry.is_finished
-    card_classes = "w-full p-2"
+    card_classes = "w-full p-1 min-h-[40px]"
     # Only grey out finished entries if NOT in Finished view mode
     if is_finished and _current_view_mode != ViewMode.FINISHED:
         card_classes += " opacity-60 bg-gray-100"
@@ -629,81 +629,86 @@ def create_subentry_card(entry: Entry, subentry: SubEntry, shelves_ui: dict) -> 
     shelf_obj = _shelves_by_name.get(subentry.shelf_name)
 
     with ui.card().classes(card_classes):
-        with ui.row().classes("w-full items-start justify-between gap-2"):
-            with ui.column().classes("flex-1 gap-1"):
-                emoji = get_emoji_for_type(entry.type)
-                subentry_name = subentry.name or entry.name
+        with ui.row().classes("w-full items-center justify-between gap-1 min-h-[32px]"):
+            # Main content - single row with title and info
+            emoji = get_emoji_for_type(entry.type)
+            subentry_name = subentry.name or entry.name
 
-                # Format time display based on shelf type
-                time_display = get_shelf_time_display(
-                    shelf_obj, subentry.estimated, subentry.spent
+            # Format time display based on shelf type
+            time_display = get_shelf_time_display(
+                shelf_obj, subentry.estimated, subentry.spent
+            )
+            # Format release date
+            date_display = format_release_date(entry.release_date)
+            rating_str = f"⭐ {entry.rating}" if entry.rating else ""
+
+            with ui.row().classes("flex-1 items-center gap-2 flex-wrap"):
+                # Spacer to align with series expand button
+                ui.element("div").classes("w-6")
+
+                # Edit button (aligned with series edit button)
+                ui.button(
+                    icon="edit",
+                    on_click=lambda e=entry, s=subentry: edit_entry_dialog(
+                        e, s, shelves_ui
+                    ),
+                ).props("flat dense round size=xs").classes("text-gray-400")
+
+                entry_label = ui.label(f"{emoji} {subentry_name}").classes(
+                    "text-sm font-semibold"
                 )
-                # Format release date
-                date_display = format_release_date(entry.release_date)
-                rating_str = f"⭐ {entry.rating}" if entry.rating else ""
+                # Add double-click handler for editing
+                entry_label.on(
+                    "dblclick",
+                    lambda e=entry, s=subentry: edit_entry_dialog(e, s, shelves_ui),
+                )
 
-                with ui.row().classes("items-center gap-2"):
-                    entry_label = ui.label(f"{emoji} {subentry_name}").classes(
-                        "text-base font-semibold"
-                    )
-                    # Add double-click handler for editing
-                    entry_label.on(
-                        "dblclick",
-                        lambda e=entry, s=subentry: edit_entry_dialog(e, s, shelves_ui),
+                # Info inline with title
+                ui.label(time_display).classes("text-xs text-gray-600")
+                if date_display:
+                    ui.label(date_display).classes("text-xs text-gray-600")
+                if rating_str:
+                    ui.label(rating_str).classes("text-xs")
+                if entry.notes:
+                    ui.label(f"📝 {entry.notes}").classes(
+                        "text-xs text-gray-500 italic"
                     )
 
+            # Action buttons
+            with ui.row().classes("items-center gap-0"):
+                # Add time button for non-movie/non-series entries that aren't finished
+                if not is_finished and entry.type not in [
+                    MediaType.MOVIE,
+                    MediaType.SERIES,
+                ]:
                     ui.button(
-                        icon="edit",
-                        on_click=lambda e=entry, s=subentry: edit_entry_dialog(
+                        icon="add",
+                        on_click=lambda e=entry, s=subentry: add_time_dialog(
                             e, s, shelves_ui
                         ),
-                    ).props("flat dense round size=sm").classes("text-gray-500")
-                    # Add time button for non-movie/non-series entries that aren't finished
-                    if not is_finished and entry.type not in [
-                        MediaType.MOVIE,
-                        MediaType.SERIES,
-                    ]:
-                        ui.button(
-                            icon="add",
-                            on_click=lambda e=entry, s=subentry: add_time_dialog(
-                                e, s, shelves_ui
-                            ),
-                        ).props("flat dense round size=sm").classes(
-                            "text-purple-600"
-                        ).tooltip("Add time")
-                    # Add finish button for non-movie/non-series entries that aren't finished
-                    if not is_finished and entry.type not in [
-                        MediaType.MOVIE,
-                        MediaType.SERIES,
-                    ]:
-                        ui.button(
-                            icon="check_circle",
-                            on_click=lambda e=entry, s=subentry: finish_entry_dialog(
-                                e, s, shelves_ui
-                            ),
-                        ).props("flat dense round size=sm").classes("text-green-600")
-                    # Add copy to next shelf button for non-movie/non-series entries
-                    if entry.type not in [MediaType.MOVIE, MediaType.SERIES]:
-                        ui.button(
-                            icon="arrow_forward",
-                            on_click=lambda e=entry, s=subentry: copy_to_next_shelf(
-                                e, s, shelves_ui
-                            ),
-                        ).props("flat dense round size=sm").classes(
-                            "text-blue-600"
-                        ).tooltip("Copy to next shelf")
-
-                with ui.row().classes("gap-3 text-xs flex-wrap"):
-                    # Order: time, date, rating
-                    ui.label(time_display)
-                    if date_display:
-                        ui.label(date_display)
-                    if rating_str:
-                        ui.label(rating_str)
-                if entry.notes:
-                    ui.label(f"Notes: {entry.notes}").classes(
-                        "text-xs text-gray-600 italic"
-                    )
+                    ).props("flat dense round size=xs").classes("text-purple-500")
+                # Add finish button for non-movie/non-series entries that aren't finished
+                if not is_finished and entry.type not in [
+                    MediaType.MOVIE,
+                    MediaType.SERIES,
+                ]:
+                    ui.button(
+                        icon="check_circle",
+                        on_click=lambda e=entry, s=subentry: finish_entry_dialog(
+                            e, s, shelves_ui
+                        ),
+                    ).props("flat dense round size=xs").classes("text-green-500")
+                # Add copy to next shelf button for non-movie/non-series entries that aren't finished
+                if not is_finished and entry.type not in [
+                    MediaType.MOVIE,
+                    MediaType.SERIES,
+                ]:
+                    ui.button(
+                        icon="arrow_forward",
+                        on_click=lambda e=entry, s=subentry: copy_to_next_shelf(
+                            e, s, shelves_ui
+                        ),
+                    ).props("flat dense round size=xs").classes("text-blue-500")
 
             # Shelf selector dropdown (only show if not finished)
             if not is_finished:
@@ -754,7 +759,7 @@ def create_grouped_entry_card(
     if episodes_on_shelf != total_episodes:
         episode_count_str += f" ({total_episodes} total)"
 
-    card_classes = "w-full p-2"
+    card_classes = "w-full p-1 min-h-[40px]"
     # Only grey out finished entries if NOT in Finished view mode
     if is_finished and _current_view_mode != ViewMode.FINISHED:
         card_classes += " opacity-60 bg-gray-100"
@@ -764,85 +769,79 @@ def create_grouped_entry_card(
     # Format release date
     date_display = format_release_date(entry.release_date)
     rating_str = f"⭐ {entry.rating}" if entry.rating else ""
+    emoji = get_emoji_for_type(entry.type)
 
     with ui.card().classes(card_classes):
         # Entry header with expand/collapse
-        with ui.row().classes("w-full items-start justify-between"):
-            with ui.column().classes("flex-1 gap-0"):
-                emoji = get_emoji_for_type(entry.type)
+        with ui.row().classes("w-full items-center justify-between gap-1 min-h-[32px]"):
+            # Will hold reference to episodes container and button for toggle
+            episodes_container = None
+            expand_btn = None
 
-                # Will hold reference to episodes container and button for toggle
-                episodes_container = None
-                expand_btn = None
-
-                # Header row with expand arrow
-                with ui.row().classes("items-center gap-1"):
-                    expand_btn = (
-                        ui.button(
-                            icon="chevron_right",
-                            on_click=lambda: toggle_episodes(),
-                        )
-                        .props("flat dense round size=sm")
-                        .classes("text-gray-500")
-                    )
-
-                    ui.label(f"{emoji} {entry.name}").classes("text-base font-bold")
+            # Header row with expand arrow and info inline
+            with ui.row().classes("flex-1 items-center gap-2 flex-wrap"):
+                expand_btn = (
                     ui.button(
-                        icon="edit",
-                        on_click=lambda e=entry: edit_entry_dialog(e, None, shelves_ui),
-                    ).props("flat dense round size=sm").classes("text-gray-500")
-
-                def toggle_episodes():
-                    episodes_container.visible = not episodes_container.visible
-                    expand_btn.props(
-                        f"icon={'expand_more' if episodes_container.visible else 'chevron_right'}"
+                        icon="chevron_right",
+                        on_click=lambda: toggle_episodes(),
                     )
+                    .props("flat dense round size=xs")
+                    .classes("text-gray-500")
+                )
 
-                with ui.row().classes("gap-3 text-xs flex-wrap"):
-                    # Order: time, date, rating, episodes
-                    ui.label(time_display)
-                    if date_display:
-                        ui.label(date_display)
-                    if rating_str:
-                        ui.label(rating_str)
-                    ui.label(f"Episodes: {episode_count_str}")
+                # Edit button right after expand (aligned with single entry edit button)
+                ui.button(
+                    icon="edit",
+                    on_click=lambda e=entry: edit_entry_dialog(e, None, shelves_ui),
+                ).props("flat dense round size=xs").classes("text-gray-400")
+
+                ui.label(f"{emoji} {entry.name}").classes("text-sm font-bold")
+
+                # Info inline
+                ui.label(time_display).classes("text-xs text-gray-600")
+                if date_display:
+                    ui.label(date_display).classes("text-xs text-gray-600")
+                if rating_str:
+                    ui.label(rating_str).classes("text-xs")
+                ui.label(f"📺 {episode_count_str}").classes("text-xs text-gray-600")
                 if entry.notes:
-                    ui.label(f"Notes: {entry.notes}").classes(
-                        "text-xs text-gray-600 italic mt-0.5"
+                    ui.label(f"📝 {entry.notes}").classes(
+                        "text-xs text-gray-500 italic"
                     )
 
-                # Subentries list (collapsible) - created here so it appears below
-                episodes_container = ui.column().classes("w-full gap-0.5 mt-1")
-                episodes_container.visible = False
-                with episodes_container:
-                    for subentry in sorted(subentries, key=lambda s: s.name or ""):
-                        create_subentry_row(entry, subentry, shelves_ui)
+            def toggle_episodes():
+                episodes_container.visible = not episodes_container.visible
+                expand_btn.props(
+                    f"icon={'expand_more' if episodes_container.visible else 'chevron_right'}"
+                )
 
             # Move all subentries dropdown (only show if not finished)
             if not is_finished:
-                with ui.column().classes("ml-2 items-end gap-1"):
-                    ui.label("Move all:").classes("text-xs text-gray-600")
+                entry_id_captured = str(entry.id)
+                current_shelf_captured = current_shelf_name
 
-                    entry_id_captured = str(entry.id)
-                    current_shelf_captured = current_shelf_name
+                def make_move_all_callback(eid: str, current_shelf: str, ui_ref: dict):
+                    async def on_move_all(e: ValueChangeEventArguments):
+                        await update_all_subentries_shelf(
+                            eid, current_shelf, e.value, ui_ref
+                        )
 
-                    def make_move_all_callback(
-                        eid: str, current_shelf: str, ui_ref: dict
-                    ):
-                        async def on_move_all(e: ValueChangeEventArguments):
-                            await update_all_subentries_shelf(
-                                eid, current_shelf, e.value, ui_ref
-                            )
+                    return on_move_all
 
-                        return on_move_all
+                ui.select(
+                    options=get_all_shelves(),
+                    value=current_shelf_name,
+                    on_change=make_move_all_callback(
+                        entry_id_captured, current_shelf_captured, shelves_ui
+                    ),
+                ).props("dense outlined").classes("text-xs min-w-[80px]")
 
-                    ui.select(
-                        options=get_all_shelves(),
-                        value=current_shelf_name,
-                        on_change=make_move_all_callback(
-                            entry_id_captured, current_shelf_captured, shelves_ui
-                        ),
-                    ).props("dense outlined").classes("text-xs")
+        # Subentries list (collapsible)
+        episodes_container = ui.column().classes("w-full gap-0 mt-0.5 ml-6")
+        episodes_container.visible = False
+        with episodes_container:
+            for subentry in sorted(subentries, key=lambda s: s.name or ""):
+                create_subentry_row(entry, subentry, shelves_ui)
 
 
 def create_subentry_row(entry: Entry, subentry: SubEntry, shelves_ui: dict) -> None:
@@ -854,7 +853,7 @@ def create_subentry_row(entry: Entry, subentry: SubEntry, shelves_ui: dict) -> N
 
     # Create container for the subentry
     with ui.row().classes(
-        "w-full items-center justify-between px-1 py-0.5 hover:bg-gray-100 rounded"
+        "w-full items-center justify-between px-1 hover:bg-gray-100 rounded"
     ):
         # Subentry info
         with ui.row().classes("flex-1 gap-2 items-center flex-wrap"):
@@ -869,10 +868,10 @@ def create_subentry_row(entry: Entry, subentry: SubEntry, shelves_ui: dict) -> N
             # Format release date for subentry
             release_date_str = format_release_date(subentry.release_date)
 
-            ui.label(f"{status_str} {subentry_name}").classes("text-xs font-medium")
-            ui.label(time_display).classes("text-xs text-gray-600")
+            ui.label(f"{status_str} {subentry_name}").classes("text-xs")
+            ui.label(time_display).classes("text-xs text-gray-500")
             if release_date_str:
-                ui.label(release_date_str).classes("text-xs text-gray-600")
+                ui.label(release_date_str).classes("text-xs text-gray-500")
 
         # Shelf selector dropdown (only show if not finished)
         if not subentry.is_finished:
@@ -1348,7 +1347,7 @@ async def setup_ui():
     with ui.column().classes("w-full max-w-6xl mx-auto p-3"):
         # Header with title and add buttons
         with ui.row().classes("w-full items-center justify-between mb-4"):
-            ui.label("📚 All Entries").classes("text-2xl font-bold")
+            ui.label("Shelfspace").classes("text-2xl font-bold")
             with ui.row().classes("gap-2"):
                 ui.button(
                     "Add Shelf",

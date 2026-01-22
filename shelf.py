@@ -955,6 +955,7 @@ async def _process_watched_episode(
 
     # Find existing entry for this season
     entry = await Entry.find_one(Entry.metadata["trakt_id"] == season_key)
+    episode_data = api.get_episode_data(show_trakt_id, season_number, episode_number)
 
     if not entry:
         # Entry doesn't exist - create it
@@ -967,11 +968,6 @@ async def _process_watched_episode(
             f"{item['show_title']} S{season_number}"
             if is_multi_season
             else item["show_title"]
-        )
-
-        # Fetch episode data
-        episode_data = api.get_episode_data(
-            show_trakt_id, season_number, episode_number
         )
 
         release_date = None
@@ -1020,9 +1016,6 @@ async def _process_watched_episode(
 
     if not episode_sub:
         # Episode doesn't exist - create it
-        episode_data = api.get_episode_data(
-            show_trakt_id, season_number, episode_number
-        )
         release_date = None
         if episode_data["first_aired"]:
             aired_dt = datetime.fromisoformat(
@@ -1048,9 +1041,6 @@ async def _process_watched_episode(
     # Episode exists - check if finished and in finished shelf
     if episode_sub.is_finished and episode_sub.shelf_id in finished_shelf_ids:
         # Create new subentry (rewatch)
-        episode_data = api.get_episode_data(
-            show_trakt_id, season_number, episode_number
-        )
         new_sub = SubEntry(
             shelf_id=target_shelf.id,
             name=ep_name,
@@ -1083,7 +1073,7 @@ async def _process_watched_episode(
     if not episode_sub.is_finished:
         episode_sub.is_finished = True
         episode_sub.estimated = episode_data["runtime"]
-        episode_sub.spent = episode_sub.estimated
+        episode_sub.spent = episode_data["runtime"]
         typer.echo(f"✓ Marked '{entry.name} {ep_name}' as finished")
         changed = True
 

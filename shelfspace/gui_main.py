@@ -8,11 +8,6 @@ from shelfspace.models import Entry, Shelf, SubEntry, MediaType
 from shelfspace.utils import format_minutes
 
 
-# Define required shelves that should always be shown
-REQUIRED_SHELVES = ["Backlog", "Icebox"]
-DEFAULT_SHELF = "Icebox"
-
-
 class ViewMode(str, Enum):
     FINISHED = "Finished"
     ACTIVE = "Active"
@@ -830,7 +825,9 @@ def create_grouped_entry_card(
                     entry_id_captured = str(entry.id)
                     current_shelf_captured = current_shelf_name
 
-                    def make_move_all_callback(eid: str, current_shelf: str, ui_ref: dict):
+                    def make_move_all_callback(
+                        eid: str, current_shelf: str, ui_ref: dict
+                    ):
                         async def on_move_all(e: ValueChangeEventArguments):
                             await update_all_subentries_shelf(
                                 eid, current_shelf, e.value, ui_ref
@@ -939,11 +936,13 @@ async def add_entry_dialog(shelves_ui: dict) -> None:
                 .props("outlined dense")
                 .classes("flex-1")
             )
+            shelf_options = get_all_shelves()
+            shelf_value = shelf_options[-1] if shelf_options else None
             shelf_select = (
                 ui.select(
-                    options=get_all_shelves(),
+                    options=shelf_options,
                     label="Shelf",
-                    value=DEFAULT_SHELF,
+                    value=shelf_value,
                 )
                 .props("outlined dense")
                 .classes("flex-1")
@@ -1275,7 +1274,7 @@ async def delete_entry_or_subentry(
             # Multiple subentries - delete only this one
             entry.subentries.remove(subentry)
             await entry.save()
-            ui.notify(f"Subentry deleted successfully", type="positive")
+            ui.notify("Subentry deleted successfully", type="positive")
 
     # Refresh UI
     await refresh_all_shelves(shelves_ui)

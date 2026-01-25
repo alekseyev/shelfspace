@@ -150,16 +150,27 @@ async def process_movies():
     save_trakt_secrets(**api._get_tokens())
 
 
-async def _cleanup_removed_movies(trakt_movies_by_id: dict[int, dict]):
-    """Remove movies from DB that are no longer in any Trakt watchlist/playlist.
+async def _cleanup_removed_entries(
+    metadata_key: str,
+    entry_types: list[str],
+    current_items_by_id: dict,
+    source_name: str,
+):
+    """Remove entries from DB that are no longer in the source.
 
-    Only removes movies/subentries that:
-    - Have trakt_id in metadata (were added from Trakt)
+    Only removes entries/subentries that:
+    - Have the metadata_key in metadata (were added from source)
     - Are in a shelf without end_date set (Icebox, Backlog, Upcoming)
     - Are not finished
 
     For entries with multiple subentries, only removes unfinished subentries
     in undated shelves. If all subentries are removed, deletes the entire entry.
+
+    Args:
+        metadata_key: The metadata key to check (e.g., "trakt_id", "hltb_id")
+        entry_types: List of MediaType values to filter by
+        current_items_by_id: Dictionary of current items keyed by metadata_key value
+        source_name: Human-readable name of the source (e.g., "Trakt lists", "HLTB backlog")
     """
     # Load shelves to check end_date
     shelves_dict = await Shelf.get_shelves_dict()
@@ -167,21 +178,21 @@ async def _cleanup_removed_movies(trakt_movies_by_id: dict[int, dict]):
         shelf.id for shelf in shelves_dict.values() if shelf.end_date is None
     }
 
-    # Find all movie entries with subentries in undated shelves
-    movie_entries = await Entry.find(
+    # Find entries with subentries in undated shelves
+    entries = await Entry.find(
         {
-            "type": MediaType.MOVIE.value,
+            "type": {"$in": entry_types},
             "subentries.shelf_id": {"$in": list(undated_shelf_ids)},
         }
     ).to_list()
 
-    for entry in movie_entries:
-        trakt_id = entry.metadata.get("trakt_id")
-        if not trakt_id:
+    for entry in entries:
+        item_id = entry.metadata.get(metadata_key)
+        if not item_id:
             continue
 
-        # Skip if movie is still in Trakt lists
-        if trakt_id in trakt_movies_by_id:
+        # Skip if item is still in source
+        if item_id in current_items_by_id:
             continue
 
         # Check subentries - only remove unfinished ones in undated shelves
@@ -201,7 +212,7 @@ async def _cleanup_removed_movies(trakt_movies_by_id: dict[int, dict]):
 
         if not subentries_to_keep:
             # All subentries removed - delete entire entry
-            typer.echo(f"Removing {entry.name} (no longer in Trakt lists)")
+            typer.echo(f"Removing {entry.name} (no longer in {source_name})")
             await entry.delete()
         else:
             # Some subentries remain - update entry
@@ -210,6 +221,16 @@ async def _cleanup_removed_movies(trakt_movies_by_id: dict[int, dict]):
                 f"Removed {subentries_removed} unfinished subentries from {entry.name}"
             )
             await entry.save()
+
+
+async def _cleanup_removed_movies(trakt_movies_by_id: dict[int, dict]):
+    """Remove movies from DB that are no longer in any Trakt watchlist/playlist."""
+    await _cleanup_removed_entries(
+        metadata_key="trakt_id",
+        entry_types=[MediaType.MOVIE.value],
+        current_items_by_id=trakt_movies_by_id,
+        source_name="Trakt lists",
+    )
 
 
 @app.async_command()
@@ -652,6 +673,25 @@ async def process_games():
         typer.echo(f"Adding {entry.name} ({entry.type.value}) to Icebox")
         await entry.save()
 
+    # Delete games that are no longer in HLTB backlog
+    # Only delete if: has hltb_id, in shelf without end_date, not finished
+    games_by_id = {g["hltb_id"]: g for g in games}
+    await _cleanup_removed_games(games_by_id)
+
+
+async def _cleanup_removed_games(hltb_games_by_id: dict[int, dict]):
+    """Remove games from DB that are no longer in HLTB backlog."""
+    await _cleanup_removed_entries(
+        metadata_key="hltb_id",
+        entry_types=[
+            MediaType.GAME.value,
+            MediaType.GAME_MOBILE.value,
+            MediaType.GAME_VR.value,
+        ],
+        current_items_by_id=hltb_games_by_id,
+        source_name="HLTB backlog",
+    )
+
 
 @app.async_command()
 async def sync_steam_playtime(init_only: bool = False):
@@ -804,6 +844,25 @@ async def process_books():
             f"Adding {get_emoji_for_type(entry.type)} {entry.name} to {shelf_name}"
         )
         await entry.save()
+
+    # Delete books that are no longer on Goodreads to-read list
+    # Only delete if: has goodreads_id, in shelf without end_date, not finished
+    books_by_id = {b["goodreads_id"]: b for b in books}
+    await _cleanup_removed_books(books_by_id)
+
+
+async def _cleanup_removed_books(goodreads_books_by_id: dict[int, dict]):
+    """Remove books from DB that are no longer on Goodreads to-read list."""
+    await _cleanup_removed_entries(
+        metadata_key="goodreads_id",
+        entry_types=[
+            MediaType.BOOK.value,
+            MediaType.BOOK_COM.value,
+            MediaType.BOOK_ED.value,
+        ],
+        current_items_by_id=goodreads_books_by_id,
+        source_name="Goodreads to-read list",
+    )
 
 
 @app.async_command()

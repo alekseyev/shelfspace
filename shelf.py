@@ -142,8 +142,74 @@ async def process_movies():
         typer.echo(f"Adding {entry.name} to Icebox")
         await entry.save()
 
+    # Delete movies that are no longer in any Trakt list
+    # Only delete if: has trakt_id, in shelf without end_date, not finished
+    await _cleanup_removed_movies(movies_by_id)
+
     # Save tokens (in case they were refreshed during API calls)
     save_trakt_secrets(**api._get_tokens())
+
+
+async def _cleanup_removed_movies(trakt_movies_by_id: dict[int, dict]):
+    """Remove movies from DB that are no longer in any Trakt watchlist/playlist.
+
+    Only removes movies/subentries that:
+    - Have trakt_id in metadata (were added from Trakt)
+    - Are in a shelf without end_date set (Icebox, Backlog, Upcoming)
+    - Are not finished
+
+    For entries with multiple subentries, only removes unfinished subentries
+    in undated shelves. If all subentries are removed, deletes the entire entry.
+    """
+    # Load shelves to check end_date
+    shelves_dict = await Shelf.get_shelves_dict()
+    undated_shelf_ids = {
+        shelf.id for shelf in shelves_dict.values() if shelf.end_date is None
+    }
+
+    # Find all movie entries with subentries in undated shelves
+    movie_entries = await Entry.find(
+        {
+            "type": MediaType.MOVIE.value,
+            "subentries.shelf_id": {"$in": list(undated_shelf_ids)},
+        }
+    ).to_list()
+
+    for entry in movie_entries:
+        trakt_id = entry.metadata.get("trakt_id")
+        if not trakt_id:
+            continue
+
+        # Skip if movie is still in Trakt lists
+        if trakt_id in trakt_movies_by_id:
+            continue
+
+        # Check subentries - only remove unfinished ones in undated shelves
+        subentries_to_keep = []
+        subentries_removed = 0
+
+        for sub in entry.subentries:
+            # Keep if finished or in dated shelf
+            if sub.is_finished or sub.shelf_id not in undated_shelf_ids:
+                subentries_to_keep.append(sub)
+            else:
+                subentries_removed += 1
+
+        if subentries_removed == 0:
+            # No subentries to remove
+            continue
+
+        if not subentries_to_keep:
+            # All subentries removed - delete entire entry
+            typer.echo(f"Removing {entry.name} (no longer in Trakt lists)")
+            await entry.delete()
+        else:
+            # Some subentries remain - update entry
+            entry.subentries = subentries_to_keep
+            typer.echo(
+                f"Removed {subentries_removed} unfinished subentries from {entry.name}"
+            )
+            await entry.save()
 
 
 @app.async_command()

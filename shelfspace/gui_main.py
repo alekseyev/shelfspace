@@ -913,11 +913,39 @@ def create_subentry_row(entry: Entry, subentry: SubEntry, shelves_ui: dict) -> N
 
 async def add_entry_dialog(shelves_ui: dict) -> None:
     """Show dialog to add a new entry."""
+    # Fetch existing entries for autocomplete
+    existing_entries = await Entry.find().to_list()
+    entry_options = {
+        str(e.id): f"{get_emoji_for_type(e.type.value)} {e.name}"
+        for e in existing_entries
+    }
+    entries_by_id = {str(e.id): e for e in existing_entries}
+
+    # Track whether we're adding to existing entry or creating new
+    selected_entry: Entry | None = None
+
     with ui.dialog() as dialog, ui.card().classes("p-4"):
         ui.label("Add New Entry").classes("text-xl font-bold mb-4")
 
-        # Form inputs
-        name_input = ui.input("Name").props("outlined dense").classes("w-full")
+        # Form inputs - use combo-box for name with autocomplete
+        # key_generator creates keys for newly typed values (prefixed to avoid collision)
+        name_select = (
+            ui.select(
+                options=entry_options,
+                label="Entry Name",
+                with_input=True,
+                new_value_mode="add",
+                key_generator=lambda v: f"new:{v}",
+            )
+            .props("outlined dense use-input input-debounce=200")
+            .classes("w-full")
+        )
+
+        # Mode indicator label
+        mode_label = ui.label("Type a new name or select existing entry").classes(
+            "text-sm text-gray-500"
+        )
+
         type_select = (
             ui.select(
                 options=[t.value for t in MediaType],
@@ -948,12 +976,41 @@ async def add_entry_dialog(shelves_ui: dict) -> None:
                 .classes("flex-1")
             )
 
+        def on_name_change(e):
+            nonlocal selected_entry
+            value = e.value
+            if value in entries_by_id:
+                # Existing entry selected
+                selected_entry = entries_by_id[value]
+                type_select.set_value(selected_entry.type.value)
+                type_select.disable()
+                mode_label.set_text(f"Adding subentry to: {selected_entry.name}")
+                mode_label.classes(
+                    remove="text-gray-500", add="text-blue-600 font-medium"
+                )
+            else:
+                # New name typed
+                selected_entry = None
+                type_select.enable()
+                if value:
+                    mode_label.set_text("Will create new entry")
+                    mode_label.classes(
+                        remove="text-blue-600 font-medium", add="text-gray-500"
+                    )
+                else:
+                    mode_label.set_text("Type a new name or select existing entry")
+                    mode_label.classes(
+                        remove="text-blue-600 font-medium", add="text-gray-500"
+                    )
+
+        name_select.on_value_change(on_name_change)
+
         # Action buttons
         with ui.row().classes("w-full justify-end gap-2 mt-4"):
             ui.button("Cancel", on_click=dialog.close).props("flat")
 
-            async def save_new_entry():
-                if not name_input.value:
+            async def save_entry():
+                if not name_select.value:
                     ui.notify("Name is required", type="negative")
                     return
 
@@ -963,29 +1020,44 @@ async def add_entry_dialog(shelves_ui: dict) -> None:
                     ui.notify("Invalid shelf selected", type="negative")
                     return
 
-                # Create entry with one subentry
-                entry = Entry(
-                    type=MediaType(type_select.value),
-                    name=name_input.value,
-                    notes=notes_input.value or "",
-                    subentries=[
-                        SubEntry(
-                            shelf_id=shelf_obj.id,
-                            estimated=int(estimated_hours.value * 60)
-                            if estimated_hours.value
-                            else None,
-                        )
-                    ],
+                new_subentry = SubEntry(
+                    shelf_id=shelf_obj.id,
+                    estimated=int(estimated_hours.value * 60)
+                    if estimated_hours.value
+                    else None,
                 )
 
-                await entry.save()
-                ui.notify(f"Entry '{entry.name}' created successfully", type="positive")
+                if selected_entry:
+                    # Add subentry to existing entry
+                    selected_entry.subentries.append(new_subentry)
+                    await selected_entry.save()
+                    ui.notify(
+                        f"Subentry added to '{selected_entry.name}'",
+                        type="positive",
+                    )
+                else:
+                    # Create new entry with one subentry
+                    # Strip "new:" prefix from key_generator
+                    entry_name = name_select.value
+                    if entry_name.startswith("new:"):
+                        entry_name = entry_name[4:]
+                    entry = Entry(
+                        type=MediaType(type_select.value),
+                        name=entry_name,
+                        notes=notes_input.value or "",
+                        subentries=[new_subentry],
+                    )
+                    await entry.save()
+                    ui.notify(
+                        f"Entry '{entry.name}' created successfully", type="positive"
+                    )
+
                 dialog.close()
 
                 # Refresh UI
                 await refresh_all_shelves(shelves_ui)
 
-            ui.button("Save", on_click=save_new_entry).props("color=primary")
+            ui.button("Save", on_click=save_entry).props("color=primary")
 
     dialog.open()
 

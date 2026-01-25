@@ -710,9 +710,9 @@ def create_subentry_card(entry: Entry, subentry: SubEntry, shelves_ui: dict) -> 
                         ),
                     ).props("flat dense round size=xs").classes("text-blue-500")
 
-            # Shelf selector dropdown (only show if not finished)
-            if not is_finished:
-                with ui.column().classes("ml-2 items-end"):
+            # Shelf selector and delete button (only show shelf selector if not finished)
+            with ui.row().classes("ml-2 items-center gap-1"):
+                if not is_finished:
                     current_shelf_name = subentry.shelf_name
                     entry_id_captured = str(entry.id)
                     subentry_name_captured = subentry.name
@@ -731,6 +731,14 @@ def create_subentry_card(entry: Entry, subentry: SubEntry, shelves_ui: dict) -> 
                             entry_id_captured, subentry_name_captured, shelves_ui
                         ),
                     ).props("dense outlined").classes("text-xs")
+
+                    # Delete button on the right of shelf selector
+                    ui.button(
+                        icon="close",
+                        on_click=lambda e=entry, s=subentry: delete_entry_dialog(
+                            e, s, shelves_ui
+                        ),
+                    ).props("flat dense round size=xs").classes("text-red-500")
 
 
 def create_grouped_entry_card(
@@ -815,26 +823,36 @@ def create_grouped_entry_card(
                     f"icon={'expand_more' if episodes_container.visible else 'chevron_right'}"
                 )
 
-            # Move all subentries dropdown (only show if not finished)
-            if not is_finished:
-                entry_id_captured = str(entry.id)
-                current_shelf_captured = current_shelf_name
+            # Shelf selector and delete button for series
+            with ui.row().classes("ml-auto items-center gap-1"):
+                # Move all subentries dropdown (only show if not finished)
+                if not is_finished:
+                    entry_id_captured = str(entry.id)
+                    current_shelf_captured = current_shelf_name
 
-                def make_move_all_callback(eid: str, current_shelf: str, ui_ref: dict):
-                    async def on_move_all(e: ValueChangeEventArguments):
-                        await update_all_subentries_shelf(
-                            eid, current_shelf, e.value, ui_ref
-                        )
+                    def make_move_all_callback(eid: str, current_shelf: str, ui_ref: dict):
+                        async def on_move_all(e: ValueChangeEventArguments):
+                            await update_all_subentries_shelf(
+                                eid, current_shelf, e.value, ui_ref
+                            )
 
-                    return on_move_all
+                        return on_move_all
 
-                ui.select(
-                    options=get_all_shelves(),
-                    value=current_shelf_name,
-                    on_change=make_move_all_callback(
-                        entry_id_captured, current_shelf_captured, shelves_ui
-                    ),
-                ).props("dense outlined").classes("text-xs min-w-[80px]")
+                    ui.select(
+                        options=get_all_shelves(),
+                        value=current_shelf_name,
+                        on_change=make_move_all_callback(
+                            entry_id_captured, current_shelf_captured, shelves_ui
+                        ),
+                    ).props("dense outlined").classes("text-xs min-w-[80px]")
+
+                    # Delete button on the right of shelf selector
+                    ui.button(
+                        icon="close",
+                        on_click=lambda e=entry: delete_entry_dialog(
+                            e, None, shelves_ui
+                        ),
+                    ).props("flat dense round size=xs").classes("text-red-500")
 
         # Subentries list (collapsible)
         episodes_container = ui.column().classes("w-full gap-0 mt-0.5 ml-6")
@@ -1220,6 +1238,84 @@ async def finish_entry_dialog(
                 await refresh_all_shelves(shelves_ui)
 
             ui.button("Finish", on_click=mark_finished).props("color=positive")
+
+    dialog.open()
+
+
+async def delete_entry_or_subentry(
+    entry: Entry, subentry: SubEntry | None, shelves_ui: dict
+) -> None:
+    """
+    Delete logic:
+    - If subentry has spent time: mark as finished (set estimated = spent time)
+    - If entry has only 1 subentry with no time tracked and not finished: delete entire entry
+    - If entry has multiple subentries: delete only that subentry
+    """
+    if subentry is None:
+        # Deleting entire entry (from series grouped view)
+        # Remove entry entirely
+        await entry.delete()
+        ui.notify(f"Entry '{entry.name}' deleted successfully", type="positive")
+    else:
+        # Deleting a specific subentry
+        if subentry.spent and subentry.spent > 0:
+            # Has spent time - mark as finished instead of deleting
+            subentry.is_finished = True
+            subentry.estimated = subentry.spent
+            await entry.save()
+            ui.notify(
+                f"Entry '{entry.name}' marked as finished (has spent time)",
+                type="positive",
+            )
+        elif len(entry.subentries) == 1:
+            # Only one subentry with no time - delete entire entry
+            await entry.delete()
+            ui.notify(f"Entry '{entry.name}' deleted successfully", type="positive")
+        else:
+            # Multiple subentries - delete only this one
+            entry.subentries.remove(subentry)
+            await entry.save()
+            ui.notify(f"Subentry deleted successfully", type="positive")
+
+    # Refresh UI
+    await refresh_all_shelves(shelves_ui)
+
+
+async def delete_entry_dialog(
+    entry: Entry, subentry: SubEntry | None, shelves_ui: dict
+) -> None:
+    """Show confirmation dialog before deleting an entry or subentry."""
+    # Determine what will happen
+    action_text = "delete this entry"
+    reason_text = ""
+
+    if subentry is not None:
+        if subentry.spent and subentry.spent > 0:
+            action_text = "mark this entry as finished"
+            reason_text = f"(has {format_minutes(subentry.spent)} spent time)"
+        elif len(entry.subentries) == 1:
+            action_text = "delete this entire entry"
+            reason_text = "(only subentry with no time tracked)"
+        else:
+            action_text = "delete this subentry"
+            reason_text = f"({len(entry.subentries) - 1} other subentries will remain)"
+    else:
+        action_text = "delete this entry entirely"
+
+    with ui.dialog() as dialog, ui.card().classes("p-4"):
+        ui.label(f"Delete: {entry.name}").classes("text-xl font-bold mb-4")
+        ui.label(f"Are you sure you want to {action_text}?").classes("text-sm mb-2")
+        if reason_text:
+            ui.label(reason_text).classes("text-xs text-gray-600 mb-4")
+
+        with ui.row().classes("w-full justify-end gap-2 mt-4"):
+            ui.button("Cancel", on_click=dialog.close).props("flat")
+
+            async def confirm_delete():
+                dialog.close()
+                await delete_entry_or_subentry(entry, subentry, shelves_ui)
+
+            ui.button("Delete", on_click=confirm_delete).props("color=negative")
 
     dialog.open()
 

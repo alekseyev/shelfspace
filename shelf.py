@@ -1,6 +1,10 @@
 from datetime import date, datetime, time as dt_time, timedelta
+import json
+from pathlib import Path
 import re
 import time
+
+from bson import ObjectId
 
 from beanie import init_beanie
 import typer
@@ -1240,6 +1244,173 @@ async def _process_watched_episode(
 
     if changed:
         await entry.save()
+
+
+@app.async_command()
+async def export_data(output: str = "shelfspace-export.json"):
+    """Export all data to JSON file.
+
+    Args:
+        output: Output file path (default: shelfspace-export.json)
+    """
+    await init_db()
+
+    # Fetch all data
+    shelves = await Shelf.find().to_list()
+    entries = await Entry.find().to_list()
+
+    # Build export structure
+    export = {
+        "exported_at": datetime.now().isoformat(),
+        "shelves": [shelf.model_dump() for shelf in shelves],
+        "entries": [entry.model_dump() for entry in entries],
+    }
+
+    # Write to file
+    output_path = Path(output)
+    output_path.write_text(json.dumps(export, indent=2, default=str))
+
+    typer.echo(f"Exported {len(shelves)} shelves and {len(entries)} entries to {output}")
+
+
+@app.async_command()
+async def import_data(
+    input_file: str = "shelfspace-export.json",
+    clear: bool = False,
+):
+    """Import data from JSON file.
+
+    Args:
+        input_file: Input file path (default: shelfspace-export.json)
+        clear: Clear all existing data before importing
+    """
+    input_path = Path(input_file)
+    if not input_path.exists():
+        typer.echo(f"Error: File not found: {input_file}")
+        raise typer.Exit(1)
+
+    await init_db()
+
+    # Read and parse JSON
+    data = json.loads(input_path.read_text())
+
+    if clear:
+        confirm = typer.confirm(
+            "This will DELETE all existing shelves and entries. Continue?"
+        )
+        if not confirm:
+            typer.echo("Aborted.")
+            raise typer.Exit(0)
+
+        deleted_shelves = await Shelf.find().delete()
+        deleted_entries = await Entry.find().delete()
+        typer.echo(
+            f"Cleared {deleted_shelves.deleted_count} shelves and "
+            f"{deleted_entries.deleted_count} entries"
+        )
+
+    # Import shelves first (entries reference them)
+    shelves_added = 0
+    shelves_skipped = 0
+    for shelf_data in data.get("shelves", []):
+        shelf_id = ObjectId(shelf_data["id"])
+
+        # Check if shelf already exists
+        existing = await Shelf.find_one({"_id": shelf_id})
+        if existing:
+            shelves_skipped += 1
+            continue
+
+        # Parse dates
+        start_date = None
+        if shelf_data.get("start_date"):
+            start_date = date.fromisoformat(shelf_data["start_date"])
+
+        end_date = None
+        if shelf_data.get("end_date"):
+            end_date = date.fromisoformat(shelf_data["end_date"])
+
+        created_at = datetime.fromisoformat(shelf_data["created_at"])
+        updated_at = datetime.fromisoformat(shelf_data["updated_at"])
+
+        shelf = Shelf(
+            id=shelf_id,
+            name=shelf_data["name"],
+            start_date=start_date,
+            end_date=end_date,
+            description=shelf_data.get("description", ""),
+            is_finished=shelf_data.get("is_finished", False),
+            weight=shelf_data.get("weight", 1),
+            created_at=created_at,
+            updated_at=updated_at,
+        )
+        await shelf.insert()
+        shelves_added += 1
+
+    typer.echo(f"Shelves: {shelves_added} added, {shelves_skipped} skipped (existing)")
+
+    # Import entries
+    entries_added = 0
+    entries_skipped = 0
+    for entry_data in data.get("entries", []):
+        entry_id = ObjectId(entry_data["id"])
+
+        # Check if entry already exists
+        existing = await Entry.find_one({"_id": entry_id})
+        if existing:
+            entries_skipped += 1
+            continue
+
+        # Parse release date
+        release_date = None
+        if entry_data.get("release_date"):
+            release_date = date.fromisoformat(entry_data["release_date"])
+
+        created_at = datetime.fromisoformat(entry_data["created_at"])
+        updated_at = datetime.fromisoformat(entry_data["updated_at"])
+
+        # Parse subentries
+        subentries = []
+        for sub_data in entry_data.get("subentries", []):
+            sub_release_date = None
+            if sub_data.get("release_date"):
+                sub_release_date = date.fromisoformat(sub_data["release_date"])
+
+            shelf_id = None
+            if sub_data.get("shelf_id"):
+                shelf_id = ObjectId(sub_data["shelf_id"])
+
+            subentries.append(
+                SubEntry(
+                    shelf=sub_data.get("shelf", ""),
+                    shelf_id=shelf_id,
+                    name=sub_data.get("name", ""),
+                    estimated=sub_data.get("estimated"),
+                    spent=sub_data.get("spent", 0),
+                    is_finished=sub_data.get("is_finished", False),
+                    release_date=sub_release_date,
+                    metadata=sub_data.get("metadata", {}),
+                )
+            )
+
+        entry = Entry(
+            id=entry_id,
+            type=MediaType(entry_data["type"]),
+            name=entry_data["name"],
+            notes=entry_data.get("notes", ""),
+            release_date=release_date,
+            rating=entry_data.get("rating"),
+            metadata=entry_data.get("metadata", {}),
+            links=entry_data.get("links", []),
+            subentries=subentries,
+            created_at=created_at,
+            updated_at=updated_at,
+        )
+        await entry.insert()
+        entries_added += 1
+
+    typer.echo(f"Entries: {entries_added} added, {entries_skipped} skipped (existing)")
+    typer.echo(f"Import complete from {input_file}")
 
 
 if __name__ == "__main__":

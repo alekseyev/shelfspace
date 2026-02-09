@@ -166,3 +166,5 @@ goodreads_library_export.csv
 test.ipynb
 secrets.json
 localdata
+shelfspace-export.json
+

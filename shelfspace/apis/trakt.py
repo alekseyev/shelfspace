@@ -28,14 +28,13 @@ class TraktAPI(BaseAPI):
         # https://trakt.docs.apiary.io/#reference/authentication-oauth/get-token
         response = requests.post(
             f"{self.base_url}/oauth/token",
-            {
+            json={
                 "refresh_token": self.refresh_token,
                 "client_id": self.client_id,
                 "client_secret": self.client_secret,
                 "redirect_uri": "urn:ietf:wg:oauth:2.0:oob",
                 "grant_type": "refresh_token",
             },
-            headers={"Content-Type": "application/json"},
         )
 
         if response.status_code != 200:
@@ -65,6 +64,54 @@ class TraktAPI(BaseAPI):
             "access_token": self.access_token,
             "refresh_token": self.refresh_token,
         }
+
+    @classmethod
+    def get_device_code(cls, client_id: str) -> dict:
+        """Request a device code for OAuth.
+
+        Returns dict with:
+            - device_code: For polling token endpoint
+            - user_code: Code user enters on Trakt website
+            - verification_url: URL user visits
+            - expires_in: Seconds until code expires
+            - interval: Polling interval in seconds
+        """
+        response = requests.post(
+            f"{cls.base_url}/oauth/device/code",
+            json={"client_id": client_id},
+        )
+
+        if response.status_code != 200:
+            raise Exception(
+                f"Failed to get device code: {response.status_code} {response.text}"
+            )
+
+        return response.json()
+
+    @classmethod
+    def poll_for_token(
+        cls, client_id: str, client_secret: str, device_code: str
+    ) -> dict | None:
+        """Poll for access token after user authorizes.
+
+        Returns token dict if authorized, None if still pending.
+        Raises Exception on error (expired, denied, etc).
+        """
+        response = requests.post(
+            f"{cls.base_url}/oauth/device/token",
+            json={
+                "code": device_code,
+                "client_id": client_id,
+                "client_secret": client_secret,
+            },
+        )
+
+        if response.status_code == 200:
+            return response.json()  # Contains access_token, refresh_token
+        elif response.status_code == 400:
+            return None  # Still pending authorization
+        else:
+            raise Exception(f"OAuth error: {response.status_code} {response.text}")
 
     def _make_request_with_retry(self, method: str, url: str, **kwargs) -> dict:
         """Make HTTP request with automatic token refresh on 401.

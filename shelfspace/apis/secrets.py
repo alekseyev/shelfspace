@@ -72,3 +72,24 @@ def save_trakt_secrets(
         "refresh_token": refresh_token,
     }
     _save_secrets_file(secrets)
+
+
+def validate_trakt_secrets() -> tuple[bool, str]:
+    """Check if Trakt secrets are configured.
+
+    Returns:
+        (is_valid, error_message)
+    """
+    secrets = get_trakt_secrets()
+
+    if not secrets["client_id"]:
+        return False, "SET_TRAKT_CLIENT_ID environment variable not set"
+    if not secrets["client_secret"]:
+        return False, "SET_TRAKT_CLIENT_SECRET environment variable not set"
+    if not secrets["access_token"]:
+        return (
+            False,
+            "No access token. Run 'python shelf.py trakt-auth' to authenticate",
+        )
+
+    return True, ""

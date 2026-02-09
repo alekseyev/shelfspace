@@ -1,5 +1,6 @@
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time as dt_time, timedelta
 import re
+import time
 
 from beanie import init_beanie
 import typer
@@ -60,8 +61,8 @@ def get_current_shelf_for_datetime(
     # Check each dated shelf
     for shelf in dated_shelves:
         # Shelf is current from start_date 00:00 to end_date+1 04:00
-        shelf_start = datetime.combine(shelf.start_date, time(0, 0))
-        shelf_end = datetime.combine(shelf.end_date + timedelta(days=1), time(4, 0))
+        shelf_start = datetime.combine(shelf.start_date, dt_time(0, 0))
+        shelf_end = datetime.combine(shelf.end_date + timedelta(days=1), dt_time(4, 0))
 
         if shelf_start <= watched_naive < shelf_end:
             return shelf
@@ -89,6 +90,41 @@ async def add_new_entries(entries: list[Entry]):
         entry.shelf = "Icebox"
         typer.echo(f"Adding {entry.name} to Icebox")
         await entry.save()
+
+
+@app.command()
+def trakt_auth():
+    """Authenticate with Trakt API and save tokens."""
+    client_id = settings.TRAKT_CLIENT_ID
+    client_secret = settings.TRAKT_CLIENT_SECRET
+
+    if not client_id or not client_secret:
+        typer.echo("Error: SET_TRAKT_CLIENT_ID and SET_TRAKT_CLIENT_SECRET must be set")
+        raise typer.Exit(1)
+
+    # Get device code
+    device_info = TraktAPI.get_device_code(client_id)
+
+    typer.echo(f"\nVisit: {device_info['verification_url']}")
+    typer.echo(f"Enter code: {device_info['user_code']}\n")
+    typer.echo("Waiting for authorization...")
+
+    # Poll for token
+    interval = device_info["interval"]
+    expires_at = time.time() + device_info["expires_in"]
+
+    while time.time() < expires_at:
+        time.sleep(interval)
+        tokens = TraktAPI.poll_for_token(
+            client_id, client_secret, device_info["device_code"]
+        )
+        if tokens:
+            save_trakt_secrets(tokens["access_token"], tokens["refresh_token"])
+            typer.echo("Authentication successful! Tokens saved to secrets.json")
+            return
+
+    typer.echo("Authorization expired. Please try again.")
+    raise typer.Exit(1)
 
 
 @app.async_command()

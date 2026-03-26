@@ -521,6 +521,8 @@ async def process_upcoming(days: int = 49):
                         break
 
                 if existing_sub:
+                    ep_updated = False
+
                     # Update runtime if missing or different
                     if api_runtime and existing_sub.estimated != api_runtime:
                         old_runtime = existing_sub.estimated
@@ -530,8 +532,31 @@ async def process_upcoming(days: int = 49):
                             f"{format_minutes(old_runtime) if old_runtime else 'N/A'} -> "
                             f"{format_minutes(api_runtime)}"
                         )
+                        ep_updated = True
+
+                    # Update release date if missing or different
+                    api_release_date = None
+                    if ep["first_aired"]:
+                        aired_dt = datetime.fromisoformat(
+                            ep["first_aired"].replace("Z", "+00:00")
+                        )
+                        api_release_date = aired_dt.date()
+                    if (
+                        api_release_date
+                        and existing_sub.release_date != api_release_date
+                    ):
+                        old_date = existing_sub.release_date
+                        existing_sub.release_date = api_release_date
+                        typer.echo(
+                            f"Updated {show_title} {ep_name} air date: "
+                            f"{old_date or 'N/A'} -> {api_release_date}"
+                        )
+                        ep_updated = True
+
+                    if ep_updated:
                         entry_updated_count += 1
                         updated_count += 1
+
                     continue
 
                 release_date = None
@@ -1156,6 +1181,13 @@ async def _process_watched_episode(
     entry = await Entry.find_one(Entry.metadata["trakt_id"] == season_key)
     episode_data = api.get_episode_data(show_trakt_id, season_number, episode_number)
 
+    release_date = None
+    if episode_data["first_aired"]:
+        aired_dt = datetime.fromisoformat(
+            episode_data["first_aired"].replace("Z", "+00:00")
+        )
+        release_date = aired_dt.date()
+
     if not entry:
         # Entry doesn't exist - create it
         # Get season summary to determine if multi-season
@@ -1168,13 +1200,6 @@ async def _process_watched_episode(
             if is_multi_season
             else item["show_title"]
         )
-
-        release_date = None
-        if episode_data["first_aired"]:
-            aired_dt = datetime.fromisoformat(
-                episode_data["first_aired"].replace("Z", "+00:00")
-            )
-            release_date = aired_dt.date()
 
         entry = Entry(
             type=MediaType.SERIES.value,
@@ -1215,13 +1240,6 @@ async def _process_watched_episode(
 
     if not episode_sub:
         # Episode doesn't exist - create it
-        release_date = None
-        if episode_data["first_aired"]:
-            aired_dt = datetime.fromisoformat(
-                episode_data["first_aired"].replace("Z", "+00:00")
-            )
-            release_date = aired_dt.date()
-
         new_sub = SubEntry(
             shelf_id=target_shelf.id,
             name=ep_name,
@@ -1246,7 +1264,7 @@ async def _process_watched_episode(
             estimated=episode_data["runtime"],
             spent=episode_data["runtime"],
             is_finished=True,
-            release_date=episode_sub.release_date,
+            release_date=release_date,
         )
         entry.subentries.append(new_sub)
         typer.echo(
@@ -1273,6 +1291,7 @@ async def _process_watched_episode(
         episode_sub.is_finished = True
         episode_sub.estimated = episode_data["runtime"]
         episode_sub.spent = episode_data["runtime"]
+        episode_sub.release_date = release_date
         typer.echo(f"✓ Marked '{entry.name} {ep_name}' as finished")
         changed = True
 

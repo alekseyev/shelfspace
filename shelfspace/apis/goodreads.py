@@ -8,10 +8,13 @@ class GoodreadsAPI:
     base_url = "https://www.goodreads.com"
     user = settings.GOODREADS_USER
 
+    def __init__(self, storage_state: dict | None = None):
+        self.storage_state = storage_state
+
     async def get_to_read(self):
         books = []
 
-        async with playwright_page() as page:
+        async with playwright_page(storage_state=self.storage_state) as page:
             url = f"{self.base_url}/review/list/{self.user}?shelf=to-read&sort=position"
             while url:
                 await page.goto(
@@ -22,12 +25,6 @@ class GoodreadsAPI:
                 rows = await page.query_selector_all("#booksBody tr")
 
                 for row in rows:
-                    # --- Position ---
-                    pos_el = await row.query_selector("td.field.position div.value")
-                    position = (
-                        int((await pos_el.inner_text()).strip()) if pos_el else None
-                    )
-
                     # --- Title ---
                     title_el = await row.query_selector("td.field.title div.value a")
                     title = (await title_el.inner_text()).strip() if title_el else None
@@ -58,7 +55,6 @@ class GoodreadsAPI:
                                 "title": title,
                                 "goodreads_id": book_id,
                                 "url": f"{self.base_url}{href}" if href else None,
-                                "position": position,
                                 "rating": rating,
                             }
                         )

@@ -74,6 +74,19 @@ def save_trakt_secrets(
     _save_secrets_file(secrets)
 
 
+def get_goodreads_storage_state() -> dict | None:
+    """Get Goodreads Playwright storage state (cookies) from secrets.json."""
+    secrets = _load_secrets_file()
+    return secrets.get("goodreads", {}).get("storage_state")
+
+
+def save_goodreads_storage_state(state: dict) -> None:
+    """Save Goodreads Playwright storage state (cookies) to secrets.json."""
+    secrets = _load_secrets_file()
+    secrets.setdefault("goodreads", {})["storage_state"] = state
+    _save_secrets_file(secrets)
+
+
 def validate_trakt_secrets() -> tuple[bool, str]:
     """Check if Trakt secrets are configured.
 

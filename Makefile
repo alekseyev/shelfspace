@@ -1,4 +1,4 @@
-.PHONY: help install format run process-all
+.PHONY: help install format run process-apis process-all
 
 install: ## Install packages from requirements.txt
 	test -d .venv || uv venv --python $(cat .python-version)
@@ -22,6 +22,7 @@ process-apis: ## Sync playtime and process Trakt data
 	python shelf.py process-upcoming
 	python shelf.py process-watched
 	python shelf.py update-trakt-lists
+	python shelf.py export-data
 
 process-all: ## Sync all the things
 	. .venv/bin/activate
@@ -33,6 +34,7 @@ process-all: ## Sync all the things
 	python shelf.py update-trakt-lists
 	python shelf.py process-books
 	python shelf.py process-games
+	python shelf.py export-data
 
 help: ## Display this help
 	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m\033[0m\n\nTargets:\n"} /^[a-zA-Z_-]+:.*?##/ { printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)

@@ -541,10 +541,7 @@ async def process_upcoming(days: int = 49):
                             ep["first_aired"].replace("Z", "+00:00")
                         )
                         api_release_date = aired_dt.date()
-                    if (
-                        api_release_date
-                        and existing_sub.release_date != api_release_date
-                    ):
+                    if api_release_date and existing_sub.release_date != api_release_date:
                         old_date = existing_sub.release_date
                         existing_sub.release_date = api_release_date
                         typer.echo(

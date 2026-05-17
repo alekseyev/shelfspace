@@ -363,15 +363,14 @@ async def finish_shelf(shelf: Shelf, shelves_ui: dict) -> None:
 
     for entry in entries:
         modified = False
+        is_series = entry.type == MediaType.SERIES
         for subentry in entry.subentries:
             # Only process subentries in this shelf that aren't finished
             if subentry.shelf_id == shelf.id and not subentry.is_finished:
                 if subentry.spent and subentry.spent > 0:
-                    # There's time spent - finish this subentry and create new one in next shelf
-                    # Save original estimated before modifying
+                    # There's time spent - finish this subentry and carry remaining to next shelf
                     original_estimated = subentry.estimated
 
-                    # Finish current subentry
                     subentry.is_finished = True
                     subentry.estimated = subentry.spent
 
@@ -379,24 +378,39 @@ async def finish_shelf(shelf: Shelf, shelves_ui: dict) -> None:
                     if original_estimated and original_estimated > subentry.spent:
                         remaining_time = original_estimated - subentry.spent
 
-                        # Create new subentry in next shelf with remaining time
-                        new_subentry = SubEntry(
-                            shelf_id=next_shelf.id,
-                            name=subentry.name,
-                            estimated=remaining_time,
-                            spent=0,
-                            is_finished=False,
-                            release_date=subentry.release_date,
-                            metadata=subentry.metadata.copy()
-                            if subentry.metadata
-                            else {},
+                        # For non-series entries, merge into existing next-shelf subentry if present
+                        existing_next = None if is_series else next(
+                            (se for se in entry.subentries if se.shelf_id == next_shelf.id),
+                            None,
                         )
-                        entry.subentries.append(new_subentry)
+                        if existing_next is not None:
+                            existing_next.estimated = (existing_next.estimated or 0) + remaining_time
+                        else:
+                            new_subentry = SubEntry(
+                                shelf_id=next_shelf.id,
+                                name=subentry.name,
+                                estimated=remaining_time,
+                                spent=0,
+                                is_finished=False,
+                                release_date=subentry.release_date,
+                                metadata=subentry.metadata.copy()
+                                if subentry.metadata
+                                else {},
+                            )
+                            entry.subentries.append(new_subentry)
 
                     modified = True
                 else:
-                    # No time spent - just move to next shelf
-                    subentry.shelf_id = next_shelf.id
+                    # No time spent - move to next shelf (or merge for non-series)
+                    existing_next = None if is_series else next(
+                        (se for se in entry.subentries if se.shelf_id == next_shelf.id),
+                        None,
+                    )
+                    if existing_next is not None:
+                        existing_next.estimated = (existing_next.estimated or 0) + (subentry.estimated or 0)
+                        entry.subentries.remove(subentry)
+                    else:
+                        subentry.shelf_id = next_shelf.id
                     modified = True
 
         if modified:
@@ -421,19 +435,22 @@ async def finish_shelf(shelf: Shelf, shelves_ui: dict) -> None:
 
 
 async def update_subentry_shelf(
-    entry_id: str, subentry_name: str, new_shelf_name: str, shelves_ui: dict
+    entry_id: str, current_shelf_id: str, new_shelf_name: str, shelves_ui: dict
 ) -> None:
     """Update a subentry's shelf and refresh affected shelf containers."""
+    from bson import ObjectId
+
     global _shelves_by_name
 
     entry_obj = await Entry.get(entry_id)
     if not entry_obj:
         return
 
-    # Find the subentry and update its shelf
+    # Find the subentry by its current shelf_id
+    current_oid = ObjectId(current_shelf_id)
     subentry = None
     for se in entry_obj.subentries:
-        if se.name == subentry_name:
+        if se.shelf_id == current_oid:
             subentry = se
             break
 
@@ -444,10 +461,32 @@ async def update_subentry_shelf(
     if old_shelf_name == new_shelf_name:
         return  # No change needed
 
-    # Get the new shelf object and set shelf_id
+    # Get the new shelf object
     new_shelf = _shelves_by_name.get(new_shelf_name)
     if not new_shelf:
         return
+
+    # For non-series entries, check if the target shelf already has a subentry.
+    # If so, merge estimated times instead of creating a duplicate.
+    is_series = entry_obj.type == MediaType.SERIES
+    if not is_series:
+        existing = next(
+            (se for se in entry_obj.subentries if se.shelf_id == new_shelf.id), None
+        )
+        if existing is not None:
+            existing.estimated = (existing.estimated or 0) + (subentry.estimated or 0)
+            entry_obj.subentries.remove(subentry)
+            await entry_obj.save()
+
+            subentries_by_shelf = await load_subentries()
+            shelves_to_update = {old_shelf_name, new_shelf_name}
+            for shelf in shelves_to_update:
+                if shelf in shelves_ui:
+                    container_ref = shelves_ui[shelf]
+                    container_ref.clear()
+                    shelf_subentries = subentries_by_shelf.get(shelf, [])
+                    build_shelf_content(shelf, shelf_subentries, shelves_ui, container_ref)
+            return
 
     subentry.shelf_id = new_shelf.id
     await entry_obj.save()
@@ -710,12 +749,12 @@ def create_subentry_card(entry: Entry, subentry: SubEntry, shelves_ui: dict) -> 
                 if not is_finished:
                     current_shelf_name = subentry.shelf_name
                     entry_id_captured = str(entry.id)
-                    subentry_name_captured = subentry.name
+                    subentry_shelf_id_captured = str(subentry.shelf_id)
 
-                    # Define callback that captures entry_id and subentry_name separately
-                    def make_callback(eid: str, sename: str, ui_ref: dict):
+                    # Define callback that captures entry_id and subentry shelf_id separately
+                    def make_callback(eid: str, current_sid: str, ui_ref: dict):
                         async def on_shelf_selected(e: ValueChangeEventArguments):
-                            await update_subentry_shelf(eid, sename, e.value, ui_ref)
+                            await update_subentry_shelf(eid, current_sid, e.value, ui_ref)
 
                         return on_shelf_selected
 
@@ -723,7 +762,7 @@ def create_subentry_card(entry: Entry, subentry: SubEntry, shelves_ui: dict) -> 
                         options=get_all_shelves(),
                         value=current_shelf_name,
                         on_change=make_callback(
-                            entry_id_captured, subentry_name_captured, shelves_ui
+                            entry_id_captured, subentry_shelf_id_captured, shelves_ui
                         ),
                     ).props("dense outlined").classes("text-xs")
 
@@ -893,12 +932,12 @@ def create_subentry_row(entry: Entry, subentry: SubEntry, shelves_ui: dict) -> N
             with ui.column().classes("ml-1"):
                 current_shelf_name = subentry.shelf_name
                 entry_id_captured = str(entry.id)
-                subentry_name_captured = subentry.name
+                subentry_shelf_id_captured = str(subentry.shelf_id)
 
-                # Define callback that captures entry_id and subentry_name separately
-                def make_callback(eid: str, sename: str, ui_ref: dict):
+                # Define callback that captures entry_id and subentry shelf_id separately
+                def make_callback(eid: str, current_sid: str, ui_ref: dict):
                     async def on_shelf_selected(e: ValueChangeEventArguments):
-                        await update_subentry_shelf(eid, sename, e.value, ui_ref)
+                        await update_subentry_shelf(eid, current_sid, e.value, ui_ref)
 
                     return on_shelf_selected
 
@@ -906,7 +945,7 @@ def create_subentry_row(entry: Entry, subentry: SubEntry, shelves_ui: dict) -> N
                     options=get_all_shelves(),
                     value=current_shelf_name,
                     on_change=make_callback(
-                        entry_id_captured, subentry_name_captured, shelves_ui
+                        entry_id_captured, subentry_shelf_id_captured, shelves_ui
                     ),
                 ).props("dense outlined").classes("min-w-[90px] text-xs")
 

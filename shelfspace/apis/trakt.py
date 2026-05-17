@@ -403,7 +403,8 @@ class TraktAPI(BaseAPI):
 
     def get_upcoming_episodes(self, days=49) -> list[dict]:
         calendar_data = self._get(
-            f"/calendars/my/shows/{date.today().strftime('%Y-%m-%d')}/{days}"
+            f"/calendars/my/shows/{date.today().strftime('%Y-%m-%d')}/{days}",
+            params={"extended": "full"},
         )
 
         result = []

@@ -42,6 +42,7 @@ def get_emoji_for_type(media_type):
         "Game": "🎮",
         "Game (VR)": "🥽",
         "Game (mobile)": "📱",
+        "Game (ignored)": "🚫",
         "Book": "📖",
         "Book (educational)": "📚",
         "Book (comics)": "💭",
@@ -236,6 +237,8 @@ async def load_subentries() -> dict[str, list[tuple[Entry, SubEntry]]]:
     # Group subentries by shelf name (resolved via shelf_id)
     subentries_by_shelf: dict[str, list[tuple[Entry, SubEntry]]] = {}
     for entry in entries:
+        if entry.type == MediaType.GAME_IGNORED:
+            continue
         for subentry in entry.subentries:
             shelf_name = subentry.shelf_name
             if shelf_name not in _shelves_by_name:

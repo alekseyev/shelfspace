@@ -31,6 +31,7 @@ class MediaType(str, enum.Enum):
     GAME_VR = "Game (VR)"
     GAME = "Game"
     GAME_MOBILE = "Game (mobile)"
+    GAME_IGNORED = "Game (ignored)"
 
 
 def get_emoji_for_type(media_type):
@@ -44,6 +45,7 @@ def get_emoji_for_type(media_type):
         "Game": "🎮",
         "Game (VR)": "🥽",
         "Game (mobile)": "📱",
+        "Game (ignored)": "🚫",
         "Book": "📖",
         "Book (educational)": "📚",
         "Book (comics)": "💭",

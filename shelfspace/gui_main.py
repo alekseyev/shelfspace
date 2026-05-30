@@ -9,6 +9,7 @@ from shelfspace.utils import format_minutes
 
 
 class ViewMode(str, Enum):
+    YEAR = "Year"  # Dynamic; pairs with _current_year for the selected year
     FINISHED = "Finished"
     ACTIVE = "Active"
     PLANNING = "Planning"
@@ -29,6 +30,12 @@ _current_search: str = ""
 
 # Global view mode state
 _current_view_mode: ViewMode = ViewMode.ACTIVE
+
+# Selected year when _current_view_mode == ViewMode.YEAR
+_current_year: int | None = None
+
+# Container for the year view, used to refresh on filter/search changes
+_year_container_ref = None
 
 
 def get_emoji_for_type(media_type):
@@ -382,12 +389,22 @@ async def finish_shelf(shelf: Shelf, shelves_ui: dict) -> None:
                         remaining_time = original_estimated - subentry.spent
 
                         # For non-series entries, merge into existing next-shelf subentry if present
-                        existing_next = None if is_series else next(
-                            (se for se in entry.subentries if se.shelf_id == next_shelf.id),
-                            None,
+                        existing_next = (
+                            None
+                            if is_series
+                            else next(
+                                (
+                                    se
+                                    for se in entry.subentries
+                                    if se.shelf_id == next_shelf.id
+                                ),
+                                None,
+                            )
                         )
                         if existing_next is not None:
-                            existing_next.estimated = (existing_next.estimated or 0) + remaining_time
+                            existing_next.estimated = (
+                                existing_next.estimated or 0
+                            ) + remaining_time
                         else:
                             new_subentry = SubEntry(
                                 shelf_id=next_shelf.id,
@@ -405,12 +422,22 @@ async def finish_shelf(shelf: Shelf, shelves_ui: dict) -> None:
                     modified = True
                 else:
                     # No time spent - move to next shelf (or merge for non-series)
-                    existing_next = None if is_series else next(
-                        (se for se in entry.subentries if se.shelf_id == next_shelf.id),
-                        None,
+                    existing_next = (
+                        None
+                        if is_series
+                        else next(
+                            (
+                                se
+                                for se in entry.subentries
+                                if se.shelf_id == next_shelf.id
+                            ),
+                            None,
+                        )
                     )
                     if existing_next is not None:
-                        existing_next.estimated = (existing_next.estimated or 0) + (subentry.estimated or 0)
+                        existing_next.estimated = (existing_next.estimated or 0) + (
+                            subentry.estimated or 0
+                        )
                         entry.subentries.remove(subentry)
                     else:
                         subentry.shelf_id = next_shelf.id
@@ -488,7 +515,9 @@ async def update_subentry_shelf(
                     container_ref = shelves_ui[shelf]
                     container_ref.clear()
                     shelf_subentries = subentries_by_shelf.get(shelf, [])
-                    build_shelf_content(shelf, shelf_subentries, shelves_ui, container_ref)
+                    build_shelf_content(
+                        shelf, shelf_subentries, shelves_ui, container_ref
+                    )
             return
 
     subentry.shelf_id = new_shelf.id
@@ -757,7 +786,9 @@ def create_subentry_card(entry: Entry, subentry: SubEntry, shelves_ui: dict) -> 
                     # Define callback that captures entry_id and subentry shelf_id separately
                     def make_callback(eid: str, current_sid: str, ui_ref: dict):
                         async def on_shelf_selected(e: ValueChangeEventArguments):
-                            await update_subentry_shelf(eid, current_sid, e.value, ui_ref)
+                            await update_subentry_shelf(
+                                eid, current_sid, e.value, ui_ref
+                            )
 
                         return on_shelf_selected
 
@@ -1538,8 +1569,328 @@ async def edit_entry_dialog(
     dialog.open()
 
 
+async def get_data_years() -> list[int]:
+    """Return distinct years from shelves that have an end_date, ascending."""
+    all_shelves = await Shelf.find().to_list()
+    years = {s.end_date.year for s in all_shelves if s.end_date}
+    return sorted(years)
+
+
+async def load_year_subentries(
+    year: int,
+) -> list[tuple[Entry, SubEntry, Shelf]]:
+    """Load (entry, subentry, shelf) tuples for subentries with spent time in the given year."""
+    await load_shelves(ignore_view_mode=True)
+    entries = await Entry.find().to_list()
+
+    result: list[tuple[Entry, SubEntry, Shelf]] = []
+    for entry in entries:
+        if entry.type == MediaType.GAME_IGNORED:
+            continue
+        for subentry in entry.subentries:
+            if not subentry.spent or subentry.spent <= 0:
+                continue
+            shelf = _shelves_by_id.get(subentry.shelf_id)
+            if not shelf or not shelf.end_date:
+                continue
+            if shelf.end_date.year != year:
+                continue
+            result.append((entry, subentry, shelf))
+
+    return result
+
+
+def build_year_breakdown(
+    entry_objects: dict[str, Entry],
+    entries_map: dict[str, list[SubEntry]],
+    entry_ids: list[str],
+) -> None:
+    """Render a compact per-media-type breakdown table with aggregated Books/Games rows."""
+    book_types = {MediaType.BOOK, MediaType.BOOK_ED, MediaType.BOOK_COM}
+    game_types = {MediaType.GAME, MediaType.GAME_VR, MediaType.GAME_MOBILE}
+
+    by_type: dict[MediaType, dict] = {}
+    for eid in entry_ids:
+        entry = entry_objects[eid]
+        bucket = by_type.setdefault(entry.type, {"entries": set(), "spent": 0})
+        bucket["entries"].add(eid)
+        bucket["spent"] += sum(s.spent or 0 for s in entries_map[eid])
+
+    def aggregate(types: set[MediaType]) -> tuple[set[str], int]:
+        entries: set[str] = set()
+        spent = 0
+        for mt in types & by_type.keys():
+            entries |= by_type[mt]["entries"]
+            spent += by_type[mt]["spent"]
+        return entries, spent
+
+    if not by_type:
+        return
+
+    rows: list[tuple[str, int, int, bool]] = []
+    for mt in sorted(by_type.keys(), key=get_media_type_order):
+        bucket = by_type[mt]
+        rows.append(
+            (
+                f"{get_emoji_for_type(mt.value)} {mt.value}",
+                len(bucket["entries"]),
+                bucket["spent"],
+                False,
+            )
+        )
+
+    book_entries, book_spent = aggregate(book_types)
+    if book_entries:
+        rows.append(("📚 All Books", len(book_entries), book_spent, True))
+
+    game_entries, game_spent = aggregate(game_types)
+    if game_entries:
+        rows.append(("🎮 All Games", len(game_entries), game_spent, True))
+
+    with ui.column().classes(
+        "max-w-md border border-gray-300 rounded gap-0 mb-2 overflow-hidden"
+    ):
+        with ui.row().classes("w-full items-center px-2 py-1 bg-gray-200 gap-2"):
+            ui.label("Breakdown").classes("text-xs font-semibold flex-1")
+            ui.label("Entries").classes(
+                "text-xs font-semibold text-gray-700 text-right"
+            ).style("min-width: 3rem")
+            ui.label("Spent").classes(
+                "text-xs font-semibold text-gray-700 text-right"
+            ).style("min-width: 4.5rem")
+
+        for i, (label, count, spent, bold) in enumerate(rows):
+            bg = "bg-gray-100" if i % 2 == 1 else "bg-white"
+            weight = " font-semibold" if bold else ""
+            with ui.row().classes(f"w-full items-center px-2 py-0.5 gap-2 {bg}"):
+                ui.label(label).classes(f"text-xs flex-1{weight}")
+                ui.label(str(count)).classes(
+                    f"text-xs text-gray-600 text-right{weight}"
+                ).style("min-width: 3rem")
+                ui.label(format_minutes(spent)).classes(
+                    f"text-xs text-gray-600 text-right{weight}"
+                ).style("min-width: 4.5rem")
+
+
+def build_year_top_items(
+    entry_objects: dict[str, Entry],
+    entries_map: dict[str, list[SubEntry]],
+    entry_ids: list[str],
+    top_n: int = 5,
+) -> None:
+    """List the top-N individual entries by total spent time for the year."""
+    ranked: list[tuple[Entry, int]] = [
+        (entry_objects[eid], sum(s.spent or 0 for s in entries_map[eid]))
+        for eid in entry_ids
+    ]
+    ranked.sort(key=lambda pair: pair[1], reverse=True)
+    top = ranked[:top_n]
+
+    if not top:
+        return
+
+    with ui.column().classes(
+        "max-w-md border border-gray-300 rounded gap-0 mb-2 overflow-hidden"
+    ):
+        with ui.row().classes("w-full items-center px-2 py-1 bg-gray-200 gap-2"):
+            ui.label(f"Top {len(top)}").classes("text-xs font-semibold flex-1")
+            ui.label("Spent").classes(
+                "text-xs font-semibold text-gray-700 text-right"
+            ).style("min-width: 4.5rem")
+
+        for i, (entry, spent) in enumerate(top):
+            bg = "bg-gray-100" if i % 2 == 1 else "bg-white"
+            emoji = get_emoji_for_type(entry.type)
+            with ui.row().classes(f"w-full items-center px-2 py-0.5 gap-2 {bg}"):
+                ui.label(f"{emoji} {entry.name}").classes("text-xs flex-1")
+                ui.label(format_minutes(spent)).classes(
+                    "text-xs text-gray-600 text-right"
+                ).style("min-width: 4.5rem")
+
+
+def build_year_content(
+    year: int,
+    items: list[tuple[Entry, SubEntry, Shelf]],
+    container,
+) -> None:
+    """Build content for the year view: breakdown panel + one card per entry."""
+    global _current_filter, _current_search
+
+    # Group subentries by entry
+    entries_map: dict[str, list[SubEntry]] = {}
+    entry_objects: dict[str, Entry] = {}
+    for entry, subentry, _shelf in items:
+        eid = str(entry.id)
+        if eid not in entries_map:
+            entries_map[eid] = []
+            entry_objects[eid] = entry
+        entries_map[eid].append(subentry)
+
+    # Apply filter + search at the entry level
+    filtered_ids = [
+        eid
+        for eid in entries_map
+        if matches_filter(entry_objects[eid], _current_filter)
+        and (
+            not _current_search
+            or any(
+                matches_search(entry_objects[eid], sub, _current_search)
+                for sub in entries_map[eid]
+            )
+        )
+    ]
+
+    total_spent = sum(
+        sub.spent or 0 for eid in filtered_ids for sub in entries_map[eid]
+    )
+
+    with container:
+        with ui.row().classes("w-full items-center gap-2 flex-wrap"):
+            ui.label(f"📅 {year}").classes("text-base font-semibold")
+            ui.label(f"({len(filtered_ids)})").classes("text-xs text-gray-500")
+            ui.label(f"⏱️ {format_minutes(total_spent)}").classes(
+                "text-xs text-gray-600"
+            )
+
+        build_year_breakdown(entry_objects, entries_map, filtered_ids)
+        build_year_top_items(entry_objects, entries_map, filtered_ids)
+
+        shelf_container = ui.column().classes(
+            "w-full p-1 border border-gray-300 rounded bg-gray-50 gap-0"
+        )
+
+        with shelf_container:
+            if not filtered_ids:
+                ui.label("No entries").classes(
+                    "text-center text-gray-400 py-1 italic w-full text-xs"
+                )
+                return
+
+            sorted_ids = sorted(
+                filtered_ids,
+                key=lambda eid: (
+                    get_media_type_order(entry_objects[eid].type),
+                    entry_objects[eid].release_date or date.max,
+                    entry_objects[eid].name,
+                ),
+            )
+
+            for eid in sorted_ids:
+                create_year_entry_card(entry_objects[eid], entries_map[eid])
+
+
+def create_year_entry_card(entry: Entry, subentries: list[SubEntry]) -> None:
+    """Card for an entry in the year view, mirroring main-view layout."""
+    global _shelves_ui_ref
+
+    total_spent = sum(s.spent or 0 for s in subentries)
+    emoji = get_emoji_for_type(entry.type)
+    date_display = format_release_date(entry.release_date)
+    rating_str = f"⭐ {entry.rating}" if entry.rating else ""
+
+    # Treat series and multi-subentry items as "grouped" (expandable, no per-sub edit)
+    is_grouped = entry.type == MediaType.SERIES or len(subentries) > 1
+
+    episodes_container = None
+    expand_btn = None
+
+    def toggle_episodes() -> None:
+        episodes_container.visible = not episodes_container.visible
+        expand_btn.props(
+            f"icon={'expand_more' if episodes_container.visible else 'chevron_right'}"
+        )
+
+    with ui.card().classes("w-full p-1 min-h-[40px]"):
+        with ui.row().classes("w-full items-center justify-between gap-1 min-h-[32px]"):
+            with ui.row().classes("flex-1 items-center gap-2 flex-wrap"):
+                if is_grouped:
+                    expand_btn = (
+                        ui.button(
+                            icon="chevron_right",
+                            on_click=lambda: toggle_episodes(),
+                        )
+                        .props("flat dense round size=xs")
+                        .classes("text-gray-500")
+                    )
+                else:
+                    # Spacer to align with the expand button in series rows
+                    ui.element("div").classes("w-6")
+
+                edit_subentry = None if is_grouped else subentries[0]
+                ui.button(
+                    icon="edit",
+                    on_click=lambda e=entry, s=edit_subentry: edit_entry_dialog(
+                        e, s, _shelves_ui_ref
+                    ),
+                ).props("flat dense round size=xs").classes("text-gray-400")
+
+                name_classes = (
+                    "text-sm font-bold" if is_grouped else "text-sm font-semibold"
+                )
+                ui.label(f"{emoji} {entry.name}").classes(name_classes)
+
+                ui.label(f"⏱️ {format_minutes(total_spent)}").classes(
+                    "text-xs text-gray-600"
+                )
+                if date_display:
+                    ui.label(date_display).classes("text-xs text-gray-600")
+                if rating_str:
+                    ui.label(rating_str).classes("text-xs")
+                if is_grouped:
+                    finished_count = sum(1 for s in subentries if s.is_finished)
+                    ui.label(f"📺 {finished_count}/{len(subentries)}").classes(
+                        "text-xs text-gray-600"
+                    )
+                if entry.notes:
+                    ui.label(f"📝 {entry.notes}").classes(
+                        "text-xs text-gray-500 italic"
+                    )
+
+        if is_grouped:
+            episodes_container = ui.column().classes("w-full gap-0 mt-0.5 ml-6")
+            episodes_container.visible = False
+            with episodes_container:
+                for subentry in sorted(subentries, key=lambda s: s.name or ""):
+                    create_year_subentry_row(entry, subentry)
+
+
+def create_year_subentry_row(entry: Entry, subentry: SubEntry) -> None:
+    """Read-only row for a subentry within a year-view grouped card."""
+    shelf_obj = _shelves_by_id.get(subentry.shelf_id)
+    shelf_name = shelf_obj.name if shelf_obj else ""
+
+    with ui.row().classes(
+        "w-full items-center px-1 hover:bg-gray-100 rounded gap-2 flex-wrap"
+    ):
+        subentry_name = subentry.name or entry.name
+        status_str = "✓" if subentry.is_finished else "○"
+
+        ui.label(f"{status_str} {subentry_name}").classes("text-xs")
+        ui.label(f"⏱️ {format_minutes(subentry.spent)}").classes("text-xs text-gray-500")
+        release_date_str = format_release_date(subentry.release_date)
+        if release_date_str:
+            ui.label(release_date_str).classes("text-xs text-gray-500")
+        if shelf_name:
+            ui.label(f"📚 {shelf_name}").classes("text-xs text-gray-500")
+
+
+async def refresh_year_view() -> None:
+    """Rebuild the year view container (used after filter/search changes)."""
+    global _year_container_ref, _current_year
+    if _year_container_ref is None or _current_year is None:
+        return
+    items = await load_year_subentries(_current_year)
+    _year_container_ref.clear()
+    build_year_content(_current_year, items, _year_container_ref)
+
+
 async def refresh_all_shelves(shelves_ui: dict) -> None:
-    """Refresh all shelf containers."""
+    """Refresh all shelf containers (or the year container when in year view)."""
+    global _current_view_mode
+    if _current_view_mode == ViewMode.YEAR:
+        await refresh_year_view()
+        return
+
     subentries_by_shelf = await load_subentries()
 
     for shelf_name, container_ref in shelves_ui.items():
@@ -1550,8 +1901,17 @@ async def refresh_all_shelves(shelves_ui: dict) -> None:
 
 async def setup_ui():
     """Setup the main UI with all subentries grouped by shelf."""
-    global _shelves_ui_ref, _current_filter, _current_view_mode
-    subentries_by_shelf = await load_subentries()
+    global _shelves_ui_ref, _current_filter, _current_view_mode, _current_year
+    global _year_container_ref
+
+    in_year_view = _current_view_mode == ViewMode.YEAR and _current_year is not None
+
+    if in_year_view:
+        # Year view needs all shelves loaded so shelf_id -> shelf works regardless of view mode
+        await load_shelves(ignore_view_mode=True)
+        subentries_by_shelf = {}
+    else:
+        subentries_by_shelf = await load_subentries()
 
     with ui.column().classes("w-full max-w-6xl mx-auto p-3"):
         # Header with title and add buttons
@@ -1571,19 +1931,39 @@ async def setup_ui():
 
         # View mode selector (hidden when searching)
         if not _current_search:
+            data_years = await get_data_years()
             with ui.row().classes("w-full gap-2 mb-2 flex-wrap"):
                 ui.label("View:").classes("text-sm font-medium")
 
-                async def apply_view_mode(mode: ViewMode):
-                    global _current_view_mode
+                async def apply_view_mode(mode: ViewMode, year: int | None = None):
+                    global _current_view_mode, _current_year
                     _current_view_mode = mode
+                    _current_year = year
 
                     # Rebuild entire UI with new view mode
                     ui.navigate.to("/")
 
                 with ui.row().classes("gap-2"):
-                    for mode in ViewMode:
-                        is_active = mode == _current_view_mode
+                    # Year buttons (one per year of data) come before Finished/Active/Planning
+                    for year in data_years:
+                        is_active = (
+                            _current_view_mode == ViewMode.YEAR
+                            and _current_year == year
+                        )
+
+                        ui.button(
+                            str(year),
+                            on_click=lambda y=year: apply_view_mode(ViewMode.YEAR, y),
+                        ).props(
+                            f"{'unelevated' if is_active else 'outline'} dense size=sm"
+                        ).classes(f"{'bg-secondary text-white' if is_active else ''}")
+
+                    for mode in (
+                        ViewMode.FINISHED,
+                        ViewMode.ACTIVE,
+                        ViewMode.PLANNING,
+                    ):
+                        is_active = mode == _current_view_mode and not in_year_view
 
                         ui.button(
                             mode.value,
@@ -1603,8 +1983,10 @@ async def setup_ui():
                     global _current_filter
                     _current_filter = category
 
-                    # Refresh all shelves with new filter
-                    await refresh_all_shelves(_shelves_ui_ref)
+                    if _current_view_mode == ViewMode.YEAR:
+                        await refresh_year_view()
+                    else:
+                        await refresh_all_shelves(_shelves_ui_ref)
 
                 with ui.row().classes("gap-2"):
                     for category in filter_categories:
@@ -1631,6 +2013,8 @@ async def setup_ui():
                 # When starting to search, just refresh shelves to avoid losing focus
                 if was_searching and not is_searching:
                     ui.navigate.to("/")
+                elif _current_view_mode == ViewMode.YEAR:
+                    await refresh_year_view()
                 else:
                     await refresh_all_shelves(_shelves_ui_ref)
 
@@ -1652,9 +2036,16 @@ async def setup_ui():
                 ignore=["input", "textarea"],
             )
 
-        if not subentries_by_shelf:
+        if in_year_view:
+            container = ui.column().classes("w-full gap-1")
+            _year_container_ref = container
+            items = await load_year_subentries(_current_year)
+            build_year_content(_current_year, items, container)
+        elif not subentries_by_shelf:
+            _year_container_ref = None
             ui.label("No entries found.").classes("text-base text-gray-500")
         else:
+            _year_container_ref = None
             # Sort shelves by weight using the shelf objects
             global _shelves_by_name
             shelf_names = list(subentries_by_shelf.keys())

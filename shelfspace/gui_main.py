@@ -1,5 +1,7 @@
 from datetime import date, timedelta
 from enum import Enum
+from urllib.parse import urlencode
+
 from nicegui import app, ui
 from nicegui.events import ValueChangeEventArguments
 
@@ -9,7 +11,7 @@ from shelfspace.utils import format_minutes
 
 
 class ViewMode(str, Enum):
-    YEAR = "Year"  # Dynamic; pairs with _current_year for the selected year
+    YEAR = "Year"  # Dynamic; pairs with get_year() for the selected year
     FINISHED = "Finished"
     ACTIVE = "Active"
     PLANNING = "Planning"
@@ -22,17 +24,74 @@ _shelves_ui_ref: dict = {}
 _shelves_by_name: dict[str, Shelf] = {}
 _shelves_by_id: dict = {}
 
-# Global filter state
-_current_filter: str = "All"
 
-# Global search state
-_current_search: str = ""
+# Per-tab UI state, isolated per browser tab via app.storage.tab.
+# Defaults are applied on first read so each tab starts independently.
+#
+# Hybrid model:
+# - filter + search live only in tab storage (changed via in-place refresh,
+#   so keeping them out of the URL avoids history churn while typing).
+# - view_mode + year are driven by URL query params (see main_page), which are
+#   synced into tab storage on page load. The URL is the source of truth for
+#   those, making views shareable/bookmarkable and back/forward-friendly; the
+#   accessors below simply read the synced value so callers stay unchanged.
+def get_filter() -> str:
+    return app.storage.tab.get("filter", "All")
 
-# Global view mode state
-_current_view_mode: ViewMode = ViewMode.ACTIVE
 
-# Selected year when _current_view_mode == ViewMode.YEAR
-_current_year: int | None = None
+def set_filter(value: str) -> None:
+    app.storage.tab["filter"] = value
+
+
+def get_search() -> str:
+    return app.storage.tab.get("search", "")
+
+
+def set_search(value: str) -> None:
+    app.storage.tab["search"] = value
+
+
+def get_view_mode() -> ViewMode:
+    return ViewMode(app.storage.tab.get("view_mode", ViewMode.ACTIVE.value))
+
+
+def set_view_mode(value: ViewMode) -> None:
+    app.storage.tab["view_mode"] = value.value
+
+
+def get_year() -> int | None:
+    return app.storage.tab.get("year")
+
+
+def set_year(value: int | None) -> None:
+    app.storage.tab["year"] = value
+
+
+def build_main_url(
+    view_mode: ViewMode | None = None,
+    year: int | None = None,
+    filter_category: str | None = None,
+) -> str:
+    """Build the main page URL with view mode, year, and filter as query params.
+
+    Defaults to the current tab state so navigations preserve the active view.
+    The year param is only included when in YEAR mode; the filter param is
+    omitted when set to the default ("All") to keep URLs clean.
+    """
+    if view_mode is None:
+        view_mode = get_view_mode()
+    if year is None:
+        year = get_year()
+    if filter_category is None:
+        filter_category = get_filter()
+
+    params: dict[str, str] = {"view": view_mode.value}
+    if view_mode == ViewMode.YEAR and year is not None:
+        params["year"] = str(year)
+    if filter_category != "All":
+        params["filter"] = filter_category
+    return f"/?{urlencode(params)}"
+
 
 # Container for the year view, used to refresh on filter/search changes
 _year_container_ref = None
@@ -218,7 +277,7 @@ def filter_shelves_by_view_mode(
 
 async def load_shelves(ignore_view_mode: bool = False) -> None:
     """Load shelves into global cache based on current view mode."""
-    global _shelves_by_name, _shelves_by_id, _current_view_mode
+    global _shelves_by_name, _shelves_by_id
     await AppCtx.ensure_initialized()
 
     # Load ALL shelves (both finished and not finished)
@@ -232,7 +291,7 @@ async def load_shelves(ignore_view_mode: bool = False) -> None:
     if ignore_view_mode:
         filtered_shelves = all_shelves
     else:
-        filtered_shelves = filter_shelves_by_view_mode(all_shelves, _current_view_mode)
+        filtered_shelves = filter_shelves_by_view_mode(all_shelves, get_view_mode())
 
     # Build name -> shelf mapping
     _shelves_by_name = {shelf.name: shelf for shelf in filtered_shelves}
@@ -244,9 +303,8 @@ async def load_subentries() -> dict[str, list[tuple[Entry, SubEntry]]]:
 
     Returns a dict mapping shelf names to lists of (entry, subentry) tuples.
     """
-    global _current_view_mode, _current_search
     # When searching, load all shelves regardless of view mode
-    await load_shelves(ignore_view_mode=bool(_current_search))
+    await load_shelves(ignore_view_mode=bool(get_search()))
     entries = await Entry.find().to_list()
 
     # Group subentries by shelf name (resolved via shelf_id)
@@ -599,18 +657,19 @@ def build_shelf_content(
     container,
 ) -> None:
     """Build the content for a shelf container."""
-    global _current_filter, _current_search
+    current_filter = get_filter()
+    current_search = get_search()
 
     # Apply filter and search
     filtered_subentries = [
         (entry, sub)
         for entry, sub in subentries
-        if matches_filter(entry, _current_filter)
-        and matches_search(entry, sub, _current_search)
+        if matches_filter(entry, current_filter)
+        and matches_search(entry, sub, current_search)
     ]
 
     # Don't show empty shelves when searching
-    if _current_search and not filtered_subentries:
+    if current_search and not filtered_subentries:
         return
 
     subentry_count = len(filtered_subentries)
@@ -631,7 +690,7 @@ def build_shelf_content(
             ui.label(time_display).classes("text-xs text-gray-600")
 
             # Add finish shelf button if shelf can be finished (not when searching)
-            if not _current_search:
+            if not current_search:
                 if shelf_obj and not shelf_obj.is_finished:
                     if can_finish_shelf(shelf_obj, filtered_subentries):
 
@@ -692,7 +751,7 @@ def build_shelf_content(
 
 def create_subentry_card(entry: Entry, subentry: SubEntry, shelves_ui: dict) -> None:
     """Create a card for a single subentry with shelf selector."""
-    global _current_view_mode, _shelves_by_name
+    global _shelves_by_name
     is_finished = subentry.is_finished
     # Get shelf object for time display formatting
     shelf_obj = _shelves_by_name.get(subentry.shelf_name)
@@ -708,7 +767,7 @@ def create_subentry_card(entry: Entry, subentry: SubEntry, shelves_ui: dict) -> 
     )
     card_classes = "w-full p-1 min-h-[40px]"
     # Only grey out finished entries if NOT in Finished view mode
-    if is_finished and _current_view_mode != ViewMode.FINISHED:
+    if is_finished and get_view_mode() != ViewMode.FINISHED:
         card_classes += " opacity-60 bg-gray-100"
     elif not_available:
         # Amber tint for entries that haven't been released yet (distinct from finished grey)
@@ -833,7 +892,7 @@ def create_grouped_entry_card(
     entry: Entry, subentries: list[SubEntry], shelves_ui: dict
 ) -> None:
     """Create a card for an entry with multiple subentries grouped together."""
-    global _current_view_mode, _shelves_by_name
+    global _shelves_by_name
     # Calculate totals for the entry
     total_estimated = sum(s.estimated or 0 for s in subentries)
     total_spent = sum(s.spent or 0 for s in subentries)
@@ -869,7 +928,7 @@ def create_grouped_entry_card(
 
     card_classes = "w-full p-1 min-h-[40px]"
     # Only grey out finished entries if NOT in Finished view mode
-    if is_finished and _current_view_mode != ViewMode.FINISHED:
+    if is_finished and get_view_mode() != ViewMode.FINISHED:
         card_classes += " opacity-60 bg-gray-100"
     elif no_available_episodes:
         # Subtle blue tint for series whose remaining episodes are all unreleased (distinct from finished grey)
@@ -1259,8 +1318,8 @@ async def add_shelf_dialog() -> None:
                 ui.notify(f"Shelf '{shelf.name}' created successfully", type="positive")
                 dialog.close()
 
-                # Rebuild UI to show new shelf
-                ui.navigate.to("/")
+                # Rebuild UI to show new shelf (preserving the current view)
+                ui.navigate.to(build_main_url())
 
             ui.button("Save", on_click=save_new_shelf).props("color=primary")
 
@@ -1749,7 +1808,8 @@ def build_year_content(
     container,
 ) -> None:
     """Build content for the year view: breakdown panel + one card per entry."""
-    global _current_filter, _current_search
+    current_filter = get_filter()
+    current_search = get_search()
 
     # Group subentries by entry
     entries_map: dict[str, list[SubEntry]] = {}
@@ -1765,11 +1825,11 @@ def build_year_content(
     filtered_ids = [
         eid
         for eid in entries_map
-        if matches_filter(entry_objects[eid], _current_filter)
+        if matches_filter(entry_objects[eid], current_filter)
         and (
-            not _current_search
+            not current_search
             or any(
-                matches_search(entry_objects[eid], sub, _current_search)
+                matches_search(entry_objects[eid], sub, current_search)
                 for sub in entries_map[eid]
             )
         )
@@ -1911,18 +1971,18 @@ def create_year_subentry_row(entry: Entry, subentry: SubEntry) -> None:
 
 async def refresh_year_view() -> None:
     """Rebuild the year view container (used after filter/search changes)."""
-    global _year_container_ref, _current_year
-    if _year_container_ref is None or _current_year is None:
+    global _year_container_ref
+    year = get_year()
+    if _year_container_ref is None or year is None:
         return
-    items = await load_year_subentries(_current_year)
+    items = await load_year_subentries(year)
     _year_container_ref.clear()
-    build_year_content(_current_year, items, _year_container_ref)
+    build_year_content(year, items, _year_container_ref)
 
 
 async def refresh_all_shelves(shelves_ui: dict) -> None:
     """Refresh all shelf containers (or the year container when in year view)."""
-    global _current_view_mode
-    if _current_view_mode == ViewMode.YEAR:
+    if get_view_mode() == ViewMode.YEAR:
         await refresh_year_view()
         return
 
@@ -1936,10 +1996,10 @@ async def refresh_all_shelves(shelves_ui: dict) -> None:
 
 async def setup_ui():
     """Setup the main UI with all subentries grouped by shelf."""
-    global _shelves_ui_ref, _current_filter, _current_view_mode, _current_year
+    global _shelves_ui_ref
     global _year_container_ref
 
-    in_year_view = _current_view_mode == ViewMode.YEAR and _current_year is not None
+    in_year_view = get_view_mode() == ViewMode.YEAR and get_year() is not None
 
     if in_year_view:
         # Year view needs all shelves loaded so shelf_id -> shelf works regardless of view mode
@@ -1965,25 +2025,21 @@ async def setup_ui():
                 ).props("color=primary")
 
         # View mode selector (hidden when searching)
-        if not _current_search:
+        if not get_search():
             data_years = await get_data_years()
             with ui.row().classes("w-full gap-2 mb-2 flex-wrap"):
                 ui.label("View:").classes("text-sm font-medium")
 
                 async def apply_view_mode(mode: ViewMode, year: int | None = None):
-                    global _current_view_mode, _current_year
-                    _current_view_mode = mode
-                    _current_year = year
-
-                    # Rebuild entire UI with new view mode
-                    ui.navigate.to("/")
+                    # View mode + year live in the URL; navigating rebuilds the
+                    # page, and main_page syncs the params into tab storage.
+                    ui.navigate.to(build_main_url(mode, year))
 
                 with ui.row().classes("gap-2"):
                     # Year buttons (one per year of data) come before Finished/Active/Planning
                     for year in data_years:
                         is_active = (
-                            _current_view_mode == ViewMode.YEAR
-                            and _current_year == year
+                            get_view_mode() == ViewMode.YEAR and get_year() == year
                         )
 
                         ui.button(
@@ -1998,7 +2054,7 @@ async def setup_ui():
                         ViewMode.ACTIVE,
                         ViewMode.PLANNING,
                     ):
-                        is_active = mode == _current_view_mode and not in_year_view
+                        is_active = mode == get_view_mode() and not in_year_view
 
                         ui.button(
                             mode.value,
@@ -2008,24 +2064,20 @@ async def setup_ui():
                         ).classes(f"{'bg-secondary text-white' if is_active else ''}")
 
         # Filter bar (hidden when searching)
-        if not _current_search:
+        if not get_search():
             with ui.row().classes("w-full gap-2 mb-4 flex-wrap"):
                 ui.label("Filter:").classes("text-sm font-medium")
 
                 filter_categories = list(get_filter_categories().keys())
 
                 async def apply_filter(category: str):
-                    global _current_filter
-                    _current_filter = category
-
-                    if _current_view_mode == ViewMode.YEAR:
-                        await refresh_year_view()
-                    else:
-                        await refresh_all_shelves(_shelves_ui_ref)
+                    # Filter lives in the URL; navigating rebuilds the page (and
+                    # the filter buttons) with the correct highlight from the param.
+                    ui.navigate.to(build_main_url(filter_category=category))
 
                 with ui.row().classes("gap-2"):
                     for category in filter_categories:
-                        is_active = category == _current_filter
+                        is_active = category == get_filter()
 
                         ui.button(
                             category,
@@ -2039,16 +2091,15 @@ async def setup_ui():
             ui.label("Search:").classes("text-sm font-medium")
 
             async def apply_search(e):
-                global _current_search
-                was_searching = bool(_current_search)
-                _current_search = e.value or ""
-                is_searching = bool(_current_search)
+                was_searching = bool(get_search())
+                set_search(e.value or "")
+                is_searching = bool(get_search())
 
                 # Only rebuild page when clearing search (to show view mode/filter again)
                 # When starting to search, just refresh shelves to avoid losing focus
                 if was_searching and not is_searching:
-                    ui.navigate.to("/")
-                elif _current_view_mode == ViewMode.YEAR:
+                    ui.navigate.to(build_main_url())
+                elif get_view_mode() == ViewMode.YEAR:
                     await refresh_year_view()
                 else:
                     await refresh_all_shelves(_shelves_ui_ref)
@@ -2056,7 +2107,7 @@ async def setup_ui():
             search_input = (
                 ui.input(
                     placeholder="Search entries... (/ or . to focus)",
-                    value=_current_search,
+                    value=get_search(),
                     on_change=apply_search,
                 )
                 .props("outlined dense clearable")
@@ -2074,8 +2125,9 @@ async def setup_ui():
         if in_year_view:
             container = ui.column().classes("w-full gap-1")
             _year_container_ref = container
-            items = await load_year_subentries(_current_year)
-            build_year_content(_current_year, items, container)
+            year = get_year()
+            items = await load_year_subentries(year)
+            build_year_content(year, items, container)
         elif not subentries_by_shelf:
             _year_container_ref = None
             ui.label("No entries found.").classes("text-base text-gray-500")
@@ -2090,7 +2142,7 @@ async def setup_ui():
                 if x in _shelves_by_name
                 else 999999,
                 # Reverse for finished mode (newest on top = highest weight first)
-                reverse=(_current_view_mode == ViewMode.FINISHED),
+                reverse=(get_view_mode() == ViewMode.FINISHED),
             )
 
             # Create containers for each shelf that we can update
@@ -2105,8 +2157,31 @@ async def setup_ui():
 
 # Create the page
 @ui.page("/")
-async def main_page():
-    """Main page showing all entries grouped by shelf."""
+async def main_page(
+    view: str | None = None,
+    year: int | None = None,
+    filter: str | None = None,
+):
+    """Main page showing all entries grouped by shelf.
+
+    View mode, year, and filter come from the URL query params
+    (?view=...&year=...&filter=...) and are synced into per-tab storage so the
+    rest of the UI can read them. Only free-text search remains in tab storage.
+    """
+    # app.storage.tab (per-tab state) is only available once the client is connected
+    await ui.context.client.connected()
+
+    # Sync URL params (source of truth for view/year/filter) into tab storage.
+    # All URLs we generate include "view", so its presence marks a navigation we
+    # own: a missing year clears any stale year, and a missing filter means "All".
+    if view is not None:
+        try:
+            set_view_mode(ViewMode(view))
+        except ValueError:
+            set_view_mode(ViewMode.ACTIVE)
+        set_year(year)
+        set_filter(filter or "All")
+
     ui.page_title("Shelfspace - Entries")
     await setup_ui()
 

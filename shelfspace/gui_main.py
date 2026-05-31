@@ -186,6 +186,14 @@ def is_dated_shelf(shelf: Shelf) -> bool:
     return shelf.start_date is not None and shelf.end_date is not None
 
 
+def is_current_shelf(shelf: Shelf | None) -> bool:
+    """Check if a shelf is the current one (its date range includes today)."""
+    if not shelf or not is_dated_shelf(shelf):
+        return False
+    today = date.today()
+    return shelf.start_date <= today <= shelf.end_date
+
+
 def filter_shelves_by_view_mode(
     shelves: list[Shelf], view_mode: ViewMode
 ) -> list[Shelf]:
@@ -263,9 +271,9 @@ async def load_subentries() -> dict[str, list[tuple[Entry, SubEntry]]]:
 
 
 def get_all_shelves() -> list[str]:
-    """Get all possible shelf options sorted by weight."""
+    """Get shelf options for the selector, excluding finished shelves."""
     global _shelves_by_name
-    shelves = list(_shelves_by_name.values())
+    shelves = [s for s in _shelves_by_name.values() if not s.is_finished]
     # Sort by weight (lower weight comes first)
     shelves.sort(key=lambda s: s.weight)
     return [shelf.name for shelf in shelves]
@@ -686,13 +694,25 @@ def create_subentry_card(entry: Entry, subentry: SubEntry, shelves_ui: dict) -> 
     """Create a card for a single subentry with shelf selector."""
     global _current_view_mode, _shelves_by_name
     is_finished = subentry.is_finished
+    # Get shelf object for time display formatting
+    shelf_obj = _shelves_by_name.get(subentry.shelf_name)
+
+    # Not yet available if it releases in the future (only flagged on the current shelf)
+    today = date.today()
+    release_date = subentry.release_date or entry.release_date
+    not_available = (
+        not is_finished
+        and is_current_shelf(shelf_obj)
+        and release_date is not None
+        and release_date > today
+    )
     card_classes = "w-full p-1 min-h-[40px]"
     # Only grey out finished entries if NOT in Finished view mode
     if is_finished and _current_view_mode != ViewMode.FINISHED:
         card_classes += " opacity-60 bg-gray-100"
-
-    # Get shelf object for time display formatting
-    shelf_obj = _shelves_by_name.get(subentry.shelf_name)
+    elif not_available:
+        # Amber tint for entries that haven't been released yet (distinct from finished grey)
+        card_classes += " bg-amber-50 text-gray-400"
 
     with ui.card().classes(card_classes):
         with ui.row().classes("w-full items-center justify-between gap-1 min-h-[32px]"):
@@ -835,10 +855,25 @@ def create_grouped_entry_card(
     if episodes_on_shelf != total_episodes:
         episode_count_str += f" ({total_episodes} total)"
 
+    # A series has no available episodes if every unwatched episode releases in the future
+    # (only flagged on the current shelf)
+    today = date.today()
+    unfinished = [s for s in subentries if not s.is_finished]
+    no_available_episodes = (
+        is_current_shelf(shelf_obj)
+        and bool(unfinished)
+        and all(
+            s.release_date is not None and s.release_date > today for s in unfinished
+        )
+    )
+
     card_classes = "w-full p-1 min-h-[40px]"
     # Only grey out finished entries if NOT in Finished view mode
     if is_finished and _current_view_mode != ViewMode.FINISHED:
         card_classes += " opacity-60 bg-gray-100"
+    elif no_available_episodes:
+        # Subtle blue tint for series whose remaining episodes are all unreleased (distinct from finished grey)
+        card_classes += " bg-amber-50 text-gray-400"
 
     # Format time display based on shelf type
     time_display = get_shelf_time_display(shelf_obj, total_estimated, total_spent)

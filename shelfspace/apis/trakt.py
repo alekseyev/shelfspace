@@ -113,7 +113,9 @@ class TraktAPI(BaseAPI):
         else:
             raise Exception(f"OAuth error: {response.status_code} {response.text}")
 
-    def _make_request_with_retry(self, method: str, url: str, **kwargs) -> dict:
+    def _make_request_with_retry(
+        self, method: str, url: str, **kwargs
+    ) -> requests.Response:
         """Make HTTP request with automatic token refresh on 401.
 
         Args:
@@ -122,7 +124,7 @@ class TraktAPI(BaseAPI):
             **kwargs: Additional arguments for requests method
 
         Returns:
-            JSON response from API
+            The requests.Response (caller decodes JSON / reads headers).
         """
         if "headers" not in kwargs or kwargs["headers"] is None:
             kwargs["headers"] = self._headers()
@@ -141,15 +143,51 @@ class TraktAPI(BaseAPI):
                 f"Failed to make {method} request to {full_url}: {response.status_code} {response.text}"
             )
 
-        return response.json()
+        return response
 
     def _get(self, url: str, params: dict = {}, headers: dict | None = None) -> dict:
         """Override _get to handle 401 errors with token refresh."""
-        return self._make_request_with_retry("get", url, headers=headers, params=params)
+        return self._make_request_with_retry(
+            "get", url, headers=headers, params=params
+        ).json()
 
     def _post(self, url: str, params: dict = {}, headers: dict | None = None) -> dict:
         """Override _post to handle 401 errors with token refresh."""
-        return self._make_request_with_retry("post", url, headers=headers, json=params)
+        return self._make_request_with_retry(
+            "post", url, headers=headers, json=params
+        ).json()
+
+    def _get_paginated(
+        self,
+        url: str,
+        params: dict | None = None,
+        headers: dict | None = None,
+        per_page: int = 100,
+    ) -> list[dict]:
+        """Fetch all pages from a paginated Trakt endpoint.
+
+        Trakt paginates list / watchlist endpoints and only returns the first
+        page unless pagination params are sent. This follows the
+        ``X-Pagination-Page-Count`` header to collect every item.
+        """
+        params = dict(params or {})
+        params["limit"] = per_page
+        page = 1
+        results: list[dict] = []
+
+        while True:
+            params["page"] = page
+            response = self._make_request_with_retry(
+                "get", url, headers=headers, params=params
+            )
+            results.extend(response.json())
+
+            page_count = int(response.headers.get("X-Pagination-Page-Count", 1) or 1)
+            if page >= page_count:
+                break
+            page += 1
+
+        return results
 
     def watchlist_movies_legacy(self) -> list[LegacyEntry]:
         data = self._get("/users/me/watchlist")
@@ -194,9 +232,9 @@ class TraktAPI(BaseAPI):
             list_slug: Custom list slug. If None, fetches from watchlist.
         """
         if list_slug:
-            data = self._get(f"/users/me/lists/{list_slug}/items")
+            data = self._get_paginated(f"/users/me/lists/{list_slug}/items")
         else:
-            data = self._get("/users/me/watchlist")
+            data = self._get_paginated("/users/me/watchlist")
 
         results = []
         for item in data:
@@ -220,9 +258,9 @@ class TraktAPI(BaseAPI):
             list_slug: Custom list slug. If None, fetches from watchlist.
         """
         if list_slug:
-            data = self._get(f"/users/me/lists/{list_slug}/items")
+            data = self._get_paginated(f"/users/me/lists/{list_slug}/items")
         else:
-            data = self._get("/users/me/watchlist")
+            data = self._get_paginated("/users/me/watchlist")
 
         results = []
         for item in data:

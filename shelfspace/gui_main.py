@@ -575,15 +575,9 @@ async def update_subentry_shelf(
             await entry_obj.save()
 
             subentries_by_shelf = await load_subentries()
-            shelves_to_update = {old_shelf_name, new_shelf_name}
-            for shelf in shelves_to_update:
-                if shelf in shelves_ui:
-                    container_ref = shelves_ui[shelf]
-                    container_ref.clear()
-                    shelf_subentries = subentries_by_shelf.get(shelf, [])
-                    build_shelf_content(
-                        shelf, shelf_subentries, shelves_ui, container_ref
-                    )
+            rebuild_shelves(
+                {old_shelf_name, new_shelf_name}, subentries_by_shelf, shelves_ui
+            )
             return
 
     subentry.shelf_id = new_shelf.id
@@ -593,14 +587,7 @@ async def update_subentry_shelf(
     subentries_by_shelf = await load_subentries()
 
     # Update both old and new shelf containers if they exist
-    shelves_to_update = {old_shelf_name, new_shelf_name}
-    for shelf in shelves_to_update:
-        if shelf in shelves_ui:
-            container_ref = shelves_ui[shelf]
-            # Clear and rebuild the container
-            container_ref.clear()
-            shelf_subentries = subentries_by_shelf.get(shelf, [])
-            build_shelf_content(shelf, shelf_subentries, shelves_ui, container_ref)
+    rebuild_shelves({old_shelf_name, new_shelf_name}, subentries_by_shelf, shelves_ui)
 
 
 async def update_all_subentries_shelf(
@@ -640,13 +627,33 @@ async def update_all_subentries_shelf(
     subentries_by_shelf = await load_subentries()
 
     # Update both old and new shelf containers if they exist
-    shelves_to_update = {current_shelf_name, new_shelf_name}
-    for shelf in shelves_to_update:
-        if shelf in shelves_ui:
-            container_ref = shelves_ui[shelf]
-            # Clear and rebuild the container
-            container_ref.clear()
-            shelf_subentries = subentries_by_shelf.get(shelf, [])
+    rebuild_shelves(
+        {current_shelf_name, new_shelf_name}, subentries_by_shelf, shelves_ui
+    )
+
+
+def rebuild_shelves(
+    shelf_names: set[str],
+    subentries_by_shelf: dict[str, list[tuple[Entry, SubEntry]]],
+    shelves_ui: dict,
+) -> None:
+    """Clear and rebuild the given shelf containers in place.
+
+    This runs inside event handlers (e.g. moving a subentry between shelves).
+    The element that triggered the event (the shelf ``ui.select``) lives inside
+    the source shelf's container, so clearing that container deletes it. We must
+    re-enter the container's slot (``with container``) before rebuilding so that
+    NiceGUI can still resolve ``context.client`` (needed by ``app.storage.tab``
+    reads in ``build_shelf_content``) via the still-attached container rather
+    than the just-deleted trigger element.
+    """
+    for shelf in shelf_names:
+        container_ref = shelves_ui.get(shelf)
+        if container_ref is None:
+            continue
+        container_ref.clear()
+        shelf_subentries = subentries_by_shelf.get(shelf, [])
+        with container_ref:
             build_shelf_content(shelf, shelf_subentries, shelves_ui, container_ref)
 
 
@@ -1987,11 +1994,7 @@ async def refresh_all_shelves(shelves_ui: dict) -> None:
         return
 
     subentries_by_shelf = await load_subentries()
-
-    for shelf_name, container_ref in shelves_ui.items():
-        container_ref.clear()
-        shelf_subentries = subentries_by_shelf.get(shelf_name, [])
-        build_shelf_content(shelf_name, shelf_subentries, shelves_ui, container_ref)
+    rebuild_shelves(set(shelves_ui.keys()), subentries_by_shelf, shelves_ui)
 
 
 async def setup_ui():

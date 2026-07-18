@@ -44,6 +44,13 @@ async def init_db():
     )
 
 
+def _parse_air_date(first_aired: str | None) -> date | None:
+    """Parse a Trakt ISO ``first_aired`` timestamp into a local date."""
+    if not first_aired:
+        return None
+    return datetime.fromisoformat(first_aired.replace("Z", "+00:00")).date()
+
+
 def get_current_shelf_for_datetime(
     watched_dt: datetime, shelves_dict: dict[str, Shelf]
 ) -> Shelf:
@@ -416,14 +423,21 @@ async def process_shows():
 
 @app.async_command()
 async def process_upcoming(days: int = 49):
-    """Add upcoming episodes from Trakt calendar that aren't in DB yet.
+    """Add upcoming episodes from Trakt calendar and (re)assign their shelves.
 
-    Episodes are placed into shelves based on their air date:
-    - If air date falls within a shelf's date range, episode goes there
-    - If show has older episodes in "Icebox", new episodes go to "Icebox"
-    - Otherwise episodes go to "Backlog"
+    Shelf rules are applied per show, across all of its seasons, and are
+    recalculated on every run for every show that appears in the calendar:
 
-    Also updates existing episodes in "Backlog" to move them to appropriate dated shelves.
+    - If the show has ANY unfinished episode in "Icebox", the whole show is
+      considered parked: every unfinished episode is moved to "Icebox". This is
+      sticky across seasons -- a new season won't jump onto a dated shelf while
+      an earlier season is still iceboxed. To un-park a show, move all of its
+      episodes out of Icebox.
+    - Otherwise each unfinished episode is placed by air date: into a dated
+      shelf whose range contains the air date, else "Backlog".
+
+    Because placement is recomputed each run, episodes follow air-date changes
+    and manual Icebox moves automatically.
     """
     await init_db()
 
@@ -439,22 +453,17 @@ async def process_upcoming(days: int = 49):
     # Sort by start date for efficient lookup
     dated_shelves.sort(key=lambda s: s.start_date)
 
-    def find_shelf_for_date(air_date: date | None, has_icebox: bool) -> str:
-        """Find appropriate shelf for an episode based on air date.
+    def resolve_shelf_id(air_date: date | None, parked: bool) -> ObjectId:
+        """Target shelf for an unfinished episode given the show's parked state."""
+        if parked:
+            return icebox_shelf.id
 
-        Returns shelf_id.
-        """
-        if not air_date:
-            # No air date - use default logic
-            return icebox_shelf.id if has_icebox else backlog_shelf.id
+        if air_date:
+            for shelf in dated_shelves:
+                if shelf.start_date <= air_date <= shelf.end_date:
+                    return shelf.id
 
-        # Check if air date falls within any dated shelf
-        for shelf in dated_shelves:
-            if shelf.start_date <= air_date <= shelf.end_date:
-                return shelf.id
-
-        # No matching dated shelf - use default logic
-        return icebox_shelf.id if has_icebox else backlog_shelf.id
+        return backlog_shelf.id
 
     typer.echo("Fetching upcoming episodes from Trakt...")
     secrets = get_trakt_secrets()
@@ -463,193 +472,158 @@ async def process_upcoming(days: int = 49):
     upcoming = api.get_upcoming_episodes(days)
     typer.echo(f"Found {len(upcoming)} upcoming episodes")
 
-    # Group episodes by show+season for efficient processing
-    episodes_by_season: dict[str, list[dict]] = {}
+    # Group upcoming episodes by show, then by season number
+    shows_data: dict[int, dict] = {}
     for ep in upcoming:
-        season_key = f"{ep['show_trakt_id']}_s{ep['season']}"
-        if season_key not in episodes_by_season:
-            episodes_by_season[season_key] = {
-                "show_title": ep["title"],
-                "show_trakt_id": ep["show_trakt_id"],
-                "show_slug": ep["show_slug"],
-                "season": ep["season"],
-                "episodes": [],
-            }
-        episodes_by_season[season_key]["episodes"].append(ep)
+        show = shows_data.setdefault(
+            ep["show_trakt_id"],
+            {"show_title": ep["title"], "show_slug": ep["show_slug"], "seasons": {}},
+        )
+        show["seasons"].setdefault(ep["season"], []).append(ep)
 
     added_count = 0
     updated_count = 0
-    for season_key, season_data in episodes_by_season.items():
-        show_trakt_id = season_data["show_trakt_id"]
-        season_number = season_data["season"]
-        show_title = season_data["show_title"]
-        show_slug = season_data["show_slug"]
+    moved_count = 0
 
-        # Check if entry for this season exists
-        existing_entry = await Entry.find_one(Entry.metadata["trakt_id"] == season_key)
+    for show_trakt_id, show in shows_data.items():
+        show_title = show["show_title"]
+        show_slug = show["show_slug"]
 
-        if existing_entry:
-            # Check if any existing subentry is in Icebox
-            has_icebox = any(
-                sub.shelf_id == icebox_shelf.id for sub in existing_entry.subentries
-            )
+        # Load every existing season entry for this show (cross-season awareness)
+        existing_entries = await Entry.find(
+            Entry.metadata["show_trakt_id"] == show_trakt_id
+        ).to_list()
+        entries_by_key = {e.metadata.get("trakt_id"): e for e in existing_entries}
 
-            # Update existing episodes in Backlog to appropriate dated shelves
-            for sub in existing_entry.subentries:
-                if sub.shelf_id == backlog_shelf.id and sub.release_date:
-                    new_shelf_id = find_shelf_for_date(sub.release_date, has_icebox)
-                    if new_shelf_id != backlog_shelf.id:
-                        sub.shelf_id = new_shelf_id
-                        new_shelf_name = shelves_dict[new_shelf_id].name
-                        typer.echo(
-                            f"Moving {show_title} {sub.name} from Backlog to {new_shelf_name}"
-                        )
-                        updated_count += 1
+        # Parked if ANY unfinished episode currently sits in Icebox (any season)
+        parked = any(
+            not sub.is_finished and sub.shelf_id == icebox_shelf.id
+            for e in existing_entries
+            for sub in e.subentries
+        )
 
-            # Add missing episodes or update runtime of existing ones
-            entry_added_count = 0
-            entry_updated_count = 0
-            for ep in season_data["episodes"]:
+        # Season summary is only needed to name a brand-new entry; fetch lazily
+        seasons_summary: list[dict] | None = None
+        dirty: set[int] = set()
+
+        for season_number, episodes in show["seasons"].items():
+            season_key = f"{show_trakt_id}_s{season_number}"
+            existing_entry = entries_by_key.get(season_key)
+
+            if existing_entry is None:
+                # No entry for this season yet - create one from the upcoming eps
+                if seasons_summary is None:
+                    seasons_summary = api.get_seasons_summary(show_trakt_id)
+                valid_seasons = [s for s in seasons_summary if s["number"]]
+                is_multi_season = len(valid_seasons) > 1
+                entry_name = (
+                    f"{show_title} S{season_number}" if is_multi_season else show_title
+                )
+
+                subentries = [
+                    SubEntry(
+                        shelf_id=resolve_shelf_id(
+                            _parse_air_date(ep["first_aired"]), parked
+                        ),
+                        name=f"S{season_number:02d}E{ep['episode']:02d}",
+                        estimated=ep["runtime"],
+                        release_date=_parse_air_date(ep["first_aired"]),
+                    )
+                    for ep in episodes
+                ]
+
+                new_entry = Entry(
+                    type=MediaType.SERIES.value,
+                    name=entry_name,
+                    subentries=subentries,
+                    release_date=subentries[0].release_date if subentries else None,
+                    metadata={
+                        "trakt_id": season_key,
+                        "show_trakt_id": show_trakt_id,
+                    },
+                    links=[
+                        f"https://trakt.tv/shows/{show_slug}/seasons/{season_number}"
+                    ],
+                )
+                existing_entries.append(new_entry)
+                entries_by_key[season_key] = new_entry
+                dirty.add(id(new_entry))
+                typer.echo(f"Adding {entry_name} ({len(subentries)} new episodes)")
+                added_count += len(subentries)
+                continue
+
+            # Entry exists - add missing episodes and update runtime / air date
+            for ep in episodes:
                 ep_name = f"S{season_number:02d}E{ep['episode']:02d}"
                 api_runtime = ep["runtime"]
+                api_release_date = _parse_air_date(ep["first_aired"])
 
-                # Check if episode already exists
-                existing_sub = None
-                for sub in existing_entry.subentries:
-                    if sub.name == ep_name:
-                        existing_sub = sub
-                        break
+                existing_sub = next(
+                    (s for s in existing_entry.subentries if s.name == ep_name), None
+                )
 
-                if existing_sub:
-                    ep_updated = False
-
-                    # Update runtime if missing or different
-                    if api_runtime and existing_sub.estimated != api_runtime:
-                        old_runtime = existing_sub.estimated
-                        existing_sub.estimated = api_runtime
-                        typer.echo(
-                            f"Updated {show_title} {ep_name} runtime: "
-                            f"{format_minutes(old_runtime) if old_runtime else 'N/A'} -> "
-                            f"{format_minutes(api_runtime)}"
+                if existing_sub is None:
+                    existing_entry.subentries.append(
+                        SubEntry(
+                            shelf_id=resolve_shelf_id(api_release_date, parked),
+                            name=ep_name,
+                            estimated=api_runtime,
+                            release_date=api_release_date,
                         )
-                        ep_updated = True
-
-                    # Update release date if missing or different
-                    api_release_date = None
-                    if ep["first_aired"]:
-                        aired_dt = datetime.fromisoformat(
-                            ep["first_aired"].replace("Z", "+00:00")
-                        )
-                        api_release_date = aired_dt.date()
-                    if (
-                        api_release_date
-                        and existing_sub.release_date != api_release_date
-                    ):
-                        old_date = existing_sub.release_date
-                        existing_sub.release_date = api_release_date
-                        typer.echo(
-                            f"Updated {show_title} {ep_name} air date: "
-                            f"{old_date or 'N/A'} -> {api_release_date}"
-                        )
-                        ep_updated = True
-
-                    if ep_updated:
-                        entry_updated_count += 1
-                        updated_count += 1
-
+                    )
+                    dirty.add(id(existing_entry))
+                    typer.echo(f"Adding {show_title} {ep_name}")
+                    added_count += 1
                     continue
 
-                release_date = None
-                if ep["first_aired"]:
-                    aired_dt = datetime.fromisoformat(
-                        ep["first_aired"].replace("Z", "+00:00")
+                if api_runtime and existing_sub.estimated != api_runtime:
+                    old_runtime = existing_sub.estimated
+                    existing_sub.estimated = api_runtime
+                    typer.echo(
+                        f"Updated {show_title} {ep_name} runtime: "
+                        f"{format_minutes(old_runtime) if old_runtime else 'N/A'} -> "
+                        f"{format_minutes(api_runtime)}"
                     )
-                    release_date = aired_dt.date()
+                    dirty.add(id(existing_entry))
+                    updated_count += 1
 
-                # Find appropriate shelf based on air date
-                shelf_id = find_shelf_for_date(release_date, has_icebox)
-                shelf_name = shelves_dict[shelf_id].name
+                if api_release_date and existing_sub.release_date != api_release_date:
+                    old_date = existing_sub.release_date
+                    existing_sub.release_date = api_release_date
+                    typer.echo(
+                        f"Updated {show_title} {ep_name} air date: "
+                        f"{old_date or 'N/A'} -> {api_release_date}"
+                    )
+                    dirty.add(id(existing_entry))
+                    updated_count += 1
 
-                new_subentry = SubEntry(
-                    shelf_id=shelf_id,
-                    name=ep_name,
-                    estimated=api_runtime,
-                    release_date=release_date,
+        # Recalculate the shelf of every unfinished episode of this show
+        for entry in existing_entries:
+            for sub in entry.subentries:
+                if sub.is_finished:
+                    continue
+                target_id = resolve_shelf_id(sub.release_date, parked)
+                if sub.shelf_id == target_id:
+                    continue
+                old_name = (
+                    shelves_dict[sub.shelf_id].name
+                    if sub.shelf_id in shelves_dict
+                    else str(sub.shelf_id)
                 )
-                existing_entry.subentries.append(new_subentry)
-                typer.echo(f"Adding {show_title} {ep_name} to {shelf_name}")
-                entry_added_count += 1
-                added_count += 1
-
-            if entry_added_count > 0 or entry_updated_count > 0:
-                await existing_entry.save()
-        else:
-            # Entry doesn't exist - check if show has ANY season in Icebox
-            any_icebox_entry = await Entry.find_one(
-                {
-                    "metadata.show_trakt_id": show_trakt_id,
-                    "subentries.shelf_id": icebox_shelf.id,
-                }
-            )
-            has_icebox = bool(any_icebox_entry)
-
-            # Get season summary to determine if multi-season
-            seasons_summary = api.get_seasons_summary(show_trakt_id)
-            valid_seasons = [s for s in seasons_summary if s["number"]]
-            is_multi_season = len(valid_seasons) > 1
-
-            entry_name = (
-                f"{show_title} S{season_number}" if is_multi_season else show_title
-            )
-
-            # Build subentries for the upcoming episodes
-            subentries = []
-            shelves_used = set()
-            for ep in season_data["episodes"]:
-                ep_name = f"S{season_number:02d}E{ep['episode']:02d}"
-                release_date = None
-                if ep["first_aired"]:
-                    aired_dt = datetime.fromisoformat(
-                        ep["first_aired"].replace("Z", "+00:00")
-                    )
-                    release_date = aired_dt.date()
-
-                # Find appropriate shelf based on air date
-                shelf_id = find_shelf_for_date(release_date, has_icebox)
-                shelves_used.add(shelves_dict[shelf_id].name)
-
-                subentries.append(
-                    SubEntry(
-                        shelf_id=shelf_id,
-                        name=ep_name,
-                        estimated=ep["runtime"],
-                        release_date=release_date,
-                    )
+                sub.shelf_id = target_id
+                typer.echo(
+                    f"Moving {entry.name} {sub.name} from {old_name} "
+                    f"to {shelves_dict[target_id].name}"
                 )
+                dirty.add(id(entry))
+                moved_count += 1
 
-            # Get first episode's release date for the entry
-            entry_release_date = subentries[0].release_date if subentries else None
-
-            entry = Entry(
-                type=MediaType.SERIES.value,
-                name=entry_name,
-                subentries=subentries,
-                release_date=entry_release_date,
-                metadata={
-                    "trakt_id": season_key,
-                    "show_trakt_id": show_trakt_id,
-                },
-                links=[f"https://trakt.tv/shows/{show_slug}/seasons/{season_number}"],
-            )
-            shelves_summary = ", ".join(sorted(shelves_used))
-            typer.echo(
-                f"Adding {entry_name} ({len(subentries)} episodes) to {shelves_summary}"
-            )
-            await entry.save()
-            added_count += len(subentries)
+        for entry in existing_entries:
+            if id(entry) in dirty:
+                await entry.save()
 
     typer.echo(
-        f"Added {added_count} new episodes, updated {updated_count} existing episodes"
+        f"Added {added_count} new episodes, updated {updated_count}, moved {moved_count}"
     )
     # Save tokens (in case they were refreshed during API calls)
     save_trakt_secrets(**api._get_tokens())

@@ -51,6 +51,57 @@ def _parse_air_date(first_aired: str | None) -> date | None:
     return datetime.fromisoformat(first_aired.replace("Z", "+00:00")).date()
 
 
+def _episode_runtime_lookup(api: TraktAPI, show_trakt_id: int):
+    """Return a lazy, per-season-cached runtime lookup for a show's episodes.
+
+    A season's episodes are fetched at most once (and ``get_season_episodes`` is
+    itself memoized in the API layer), so callers never issue a request per
+    episode -- only per season, and only when a runtime is actually needed.
+    """
+    season_runtimes: dict[int, dict[int, int | None]] = {}
+
+    def episode_runtime(season_number: int, episode_number: int) -> int | None:
+        if season_number not in season_runtimes:
+            season_runtimes[season_number] = {
+                ep["number"]: ep["runtime"]
+                for ep in api.get_season_episodes(show_trakt_id, season_number)
+            }
+        return season_runtimes[season_number].get(episode_number)
+
+    return episode_runtime
+
+
+def _fill_missing_episode_runtimes(
+    entries: list[Entry], api: TraktAPI, show_trakt_id: int
+) -> set[int]:
+    """Backfill missing runtimes for unfinished episodes from the season endpoint.
+
+    The Trakt calendar payload sometimes reports a null runtime that the season
+    endpoint has. Mutates subentries in place and returns the ``id()`` set of the
+    entries that were modified, so the caller can save exactly those. A season is
+    only fetched when one of its episodes is actually missing a runtime.
+    """
+    episode_runtime = _episode_runtime_lookup(api, show_trakt_id)
+
+    changed: set[int] = set()
+    for entry in entries:
+        for sub in entry.subentries:
+            if sub.is_finished or sub.estimated:
+                continue
+            match = re.fullmatch(r"S(\d+)E(\d+)", sub.name or "")
+            if not match:
+                continue
+            runtime = episode_runtime(int(match[1]), int(match[2]))
+            if not runtime:
+                continue
+            sub.estimated = runtime
+            typer.echo(
+                f"Filled {entry.name} {sub.name} runtime: {format_minutes(runtime)}"
+            )
+            changed.add(id(entry))
+    return changed
+
+
 def get_current_shelf_for_datetime(
     watched_dt: datetime, shelves_dict: dict[str, Shelf]
 ) -> Shelf:
@@ -193,7 +244,26 @@ async def process_movies():
     typer.echo(f"Found {len(movies_by_id)} unique movies")
 
     for movie in movies_by_id.values():
-        if await Entry.find_one(Entry.metadata["trakt_id"] == movie["trakt_id"]):
+        existing_entry = await Entry.find_one(
+            Entry.metadata["trakt_id"] == movie["trakt_id"]
+        )
+        if existing_entry:
+            # Backfill a missing runtime for unfinished subentries from Trakt
+            missing = [
+                sub
+                for sub in existing_entry.subentries
+                if not sub.is_finished and not sub.estimated
+            ]
+            if not missing:
+                continue
+            runtime = api.get_movie_data(movie["trakt_id"])["runtime"]
+            if runtime:
+                for sub in missing:
+                    sub.estimated = runtime
+                typer.echo(
+                    f"Filled {existing_entry.name} runtime: {format_minutes(runtime)}"
+                )
+                await existing_entry.save()
             continue
 
         # Fetch full movie details only when adding to database
@@ -337,12 +407,19 @@ async def process_shows():
     for show in shows_by_id.values():
         show_trakt_id = show["trakt_id"]
 
-        # Check if show already has any entries in DB - skip API calls if so
-        existing_entry = await Entry.find_one(
+        # Show already in DB - don't re-import, only backfill missing runtimes
+        existing_entries = await Entry.find(
             Entry.metadata["show_trakt_id"] == show_trakt_id
-        )
-        if existing_entry:
-            typer.echo(f"Skipping {show['name']} (already in DB)")
+        ).to_list()
+        if existing_entries:
+            changed = _fill_missing_episode_runtimes(
+                existing_entries, api, show_trakt_id
+            )
+            for entry in existing_entries:
+                if id(entry) in changed:
+                    await entry.save()
+            if not changed:
+                typer.echo(f"Skipping {show['name']} (already in DB)")
             continue
 
         typer.echo(f"Processing {show['name']}...")
@@ -596,6 +673,9 @@ async def process_upcoming(days: int = 49):
                     )
                     dirty.add(id(existing_entry))
                     updated_count += 1
+
+        # Backfill missing runtimes from the authoritative season endpoint
+        dirty |= _fill_missing_episode_runtimes(existing_entries, api, show_trakt_id)
 
         # Recalculate the shelf of every unfinished episode of this show
         for entry in existing_entries:

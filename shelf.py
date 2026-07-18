@@ -1127,10 +1127,17 @@ async def _process_watched_movie(
             )
             changed = True
 
+        # Always save the movie runtime to both estimated and spent
+        runtime = api.get_movie_data(trakt_id)["runtime"]
+        if runtime and (
+            unfinished_sub.estimated != runtime or unfinished_sub.spent != runtime
+        ):
+            unfinished_sub.estimated = runtime
+            unfinished_sub.spent = runtime
+            changed = True
+
         if not unfinished_sub.is_finished:
             unfinished_sub.is_finished = True
-            if unfinished_sub.estimated:
-                unfinished_sub.spent = unfinished_sub.estimated
             typer.echo(f"✓ Marked '{entry.name}' as finished")
             changed = True
 

@@ -40,7 +40,7 @@ servers:
     autostart: true
 
 commands:
-  init: uv sync && uv run playwright install chromium
+  init: curl -LsSf https://astral.sh/uv/install.sh | sh && uv sync && uv run playwright install chromium
   dev: uv run python -m shelfspace.gui_main
   verify:
     - name: format

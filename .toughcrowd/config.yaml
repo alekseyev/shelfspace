@@ -1,0 +1,49 @@
+version: 1
+
+runtime:
+  kind: docker-compose
+  composeFile: ../docker-compose.yml
+
+resources:
+  class: economy
+
+compose:
+  services:
+    - mongo
+
+env:
+  SET_MONGO_URL: "mongodb://root:secret@localhost:4001"
+  SET_MONGO_DB: "shelfspace"
+  SET_TRAKT_CLIENT_ID:
+    from: secret
+    name: SET_TRAKT_CLIENT_ID
+  SET_TRAKT_CLIENT_SECRET:
+    from: secret
+    name: SET_TRAKT_CLIENT_SECRET
+  SET_HLTB_USER:
+    from: secret
+    name: SET_HLTB_USER
+  SET_GOODREADS_USER:
+    from: secret
+    name: SET_GOODREADS_USER
+  SET_STEAM_USER_ID:
+    from: secret
+    name: SET_STEAM_USER_ID
+  SET_STEAM_API_KEY:
+    from: secret
+    name: SET_STEAM_API_KEY
+
+servers:
+  - name: app
+    command: uv run python -m shelfspace.gui_main
+    port: 8080
+    autostart: true
+
+commands:
+  init: uv sync && uv run playwright install chromium
+  dev: uv run python -m shelfspace.gui_main
+  verify:
+    - name: format
+      command: uv run ruff format -- {files}
+    - name: lint
+      command: uv run ruff check --fix -- {files}

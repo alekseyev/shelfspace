@@ -9,13 +9,17 @@ from shelfspace.models import LegacyEntry, MediaType, Status
 from shelfspace.cache import cache
 
 
+class TraktAuthError(Exception):
+    """Raised when Trakt OAuth credentials are missing or cannot be refreshed."""
+
+
 class TraktAPI(BaseAPI):
     base_url = "https://api.trakt.tv"
 
     def __init__(
         self,
         client_id: str,
-        access_token: str,
+        access_token: str | None,
         refresh_token: str | None = None,
         client_secret: str | None = None,
     ):
@@ -26,6 +30,22 @@ class TraktAPI(BaseAPI):
 
     def _refresh_token(self) -> dict:
         # https://trakt.docs.apiary.io/#reference/authentication-oauth/get-token
+        missing = [
+            name
+            for name, value in {
+                "refresh_token": self.refresh_token,
+                "client_id": self.client_id,
+                "client_secret": self.client_secret,
+            }.items()
+            if not value
+        ]
+        if missing:
+            raise TraktAuthError(
+                "Cannot refresh Trakt API token; missing "
+                + ", ".join(missing)
+                + ". Run 'python shelf.py trakt-auth' after setting Trakt credentials."
+            )
+
         response = requests.post(
             f"{self.base_url}/oauth/token",
             json={
@@ -38,19 +58,21 @@ class TraktAPI(BaseAPI):
         )
 
         if response.status_code != 200:
-            raise Exception(
+            raise TraktAuthError(
                 f"Failed to refresh Trakt API tokens: {response.status_code} {response.text}"
             )
 
         return response.json()
 
     def _headers(self) -> dict:
-        return {
+        headers = {
             "Content-type": "application/json",
             "trakt-api-key": self.client_id,
             "trakt-api-version": "2",
-            "Authorization": f"Bearer {self.access_token}",
         }
+        if self.access_token:
+            headers["Authorization"] = f"Bearer {self.access_token}"
+        return headers
 
     def _handle_token_refresh(self) -> None:
         """Refresh access token and update instance with new tokens."""
@@ -134,14 +156,23 @@ class TraktAPI(BaseAPI):
         response = request_method(full_url, **kwargs)
 
         if response.status_code == 401:
-            self._handle_token_refresh()
+            try:
+                self._handle_token_refresh()
+            except TraktAuthError as exc:
+                raise TraktAuthError(
+                    f"Trakt API returned 401 for {method.upper()} {full_url}, "
+                    f"and token refresh failed: {exc}"
+                ) from exc
             kwargs["headers"] = self._headers()
             response = request_method(full_url, **kwargs)
 
         if response.status_code != 200:
-            raise Exception(
+            message = (
                 f"Failed to make {method} request to {full_url}: {response.status_code} {response.text}"
             )
+            if response.status_code == 401:
+                raise TraktAuthError(message)
+            raise Exception(message)
 
         return response
 

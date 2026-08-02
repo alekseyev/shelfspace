@@ -104,5 +104,10 @@ def validate_trakt_secrets() -> tuple[bool, str]:
             False,
             "No access token. Run 'python shelf.py trakt-auth' to authenticate",
         )
+    if not secrets["refresh_token"]:
+        return (
+            False,
+            "No refresh token. Run 'python shelf.py trakt-auth' to re-authenticate",
+        )
 
     return True, ""

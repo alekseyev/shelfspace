@@ -129,6 +129,22 @@ class SubEntry(BaseModel):
                 return Shelf._shelves_dict[self.shelf_id].name
         return str(self.shelf_id)
 
+    def mark_watched(self) -> bool:
+        """Credit the full estimate as spent time and finish this subentry.
+
+        Movies and episodes are all-or-nothing: watching one spends exactly its
+        runtime. Returns False when no runtime is known, leaving the subentry
+        untouched so the caller can ask for one rather than assume.
+        """
+        runtime = self.estimated or self.spent
+        if not runtime:
+            return False
+
+        self.estimated = runtime
+        self.spent = runtime
+        self.is_finished = True
+        return True
+
     def __str__(self) -> str:
         return (
             f"Subentry{' ' + self.name if self.name else ''} @{self.shelf_name} - "

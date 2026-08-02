@@ -828,6 +828,19 @@ def create_subentry_card(entry: Entry, subentry: SubEntry, shelves_ui: dict) -> 
 
             # Action buttons
             with ui.row().classes("items-center gap-0"):
+                # Watched button: movies/episodes are all-or-nothing, so no time prompt
+                if not is_finished and entry.type in [
+                    MediaType.MOVIE,
+                    MediaType.SERIES,
+                ]:
+                    ui.button(
+                        icon="visibility",
+                        on_click=lambda e=entry, s=subentry: mark_watched(
+                            e, s, shelves_ui
+                        ),
+                    ).props("flat dense round size=xs").classes(
+                        "text-green-600"
+                    ).tooltip("Mark as watched")
                 # Add time button for non-movie/non-series entries that aren't finished
                 if not is_finished and entry.type not in [
                     MediaType.MOVIE,
@@ -1061,6 +1074,18 @@ def create_subentry_row(entry: Entry, subentry: SubEntry, shelves_ui: dict) -> N
             ui.label(time_display).classes("text-xs text-gray-500")
             if release_date_str:
                 ui.label(release_date_str).classes("text-xs text-gray-500")
+
+        # Watched button: movies/episodes are all-or-nothing, so no time prompt
+        if not subentry.is_finished and entry.type in [
+            MediaType.MOVIE,
+            MediaType.SERIES,
+        ]:
+            ui.button(
+                icon="visibility",
+                on_click=lambda e=entry, s=subentry: mark_watched(e, s, shelves_ui),
+            ).props("flat dense round size=xs").classes("text-green-600").tooltip(
+                "Mark as watched"
+            )
 
         # Shelf selector dropdown (only show if not finished)
         if not subentry.is_finished:
@@ -1385,6 +1410,27 @@ async def copy_to_next_shelf(
     ui.notify(f"Entry copied to {next_shelf.name}", type="positive")
 
     # Refresh UI
+    await refresh_all_shelves(shelves_ui)
+
+
+async def mark_watched(entry: Entry, subentry: SubEntry, shelves_ui: dict) -> None:
+    """Mark a movie or episode as watched, the way the Trakt history sync used to.
+
+    With no runtime on record there is nothing to credit, so fall back to the
+    dialog that asks for one.
+    """
+    if not subentry.mark_watched():
+        await finish_entry_dialog(entry, subentry, shelves_ui)
+        return
+
+    await entry.save()
+
+    name = subentry.name or entry.name
+    ui.notify(
+        f"Marked '{name}' as watched ({format_minutes(subentry.spent)})",
+        type="positive",
+    )
+
     await refresh_all_shelves(shelves_ui)
 
 

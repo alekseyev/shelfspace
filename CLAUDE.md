@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Shelfspace is a media aggregation and management system for tracking reading/viewing/play lists. It aggregates content from multiple APIs (Goodreads, Trakt, HowLongToBeat) and organizes them into shelves for planning and tracking media consumption.
+Shelfspace is a media aggregation and management system for tracking reading/viewing/play lists. It aggregates content from multiple APIs (TMDB, Goodreads, HowLongToBeat, Steam) and organizes them into shelves for planning and tracking media consumption.
 
 ## Development Commands
 
@@ -32,9 +32,7 @@ docker-compose up -d
 ### CLI Commands (via shelf.py)
 ```bash
 # Process and import content from external APIs
-python shelf.py process-movies      # Import movies from Trakt
-python shelf.py process-shows       # Import TV shows from Trakt
-python shelf.py process-upcoming    # Add upcoming episodes from Trakt calendar
+python shelf.py refresh-media       # Refresh movies/shows from TMDB (new episodes, runtimes, air dates, ratings)
 python shelf.py process-games       # Import games from HowLongToBeat
 python shelf.py process-books       # Import books from Goodreads
 
@@ -87,10 +85,13 @@ The application uses a hierarchical document model stored in MongoDB via Beanie 
 
 **API Integrations** (`shelfspace/apis/`)
 - `base.py` - BaseAPI class with common HTTP methods
-- `trakt.py` - TraktAPI for movies and TV shows (requires OAuth tokens)
+- `tmdb.py` - TMDBAPI for movies and TV shows, plus the Entry builders and refresh rules
 - `hltb.py` - HowLongAPI for game time estimates (uses Playwright for scraping)
 - `goodreads.py` - GoodreadsAPI for books (reads the public shelf RSS feed, no auth)
-- `secrets.py` - Manages API credentials from secrets.json
+
+**Media Library** (`library.py`, `shelving.py`)
+- `library.py` - import/refresh operations shared by the GUI add dialog and `refresh-media`
+- `shelving.py` - `ShelfPlacement`, which decides the shelf for an unwatched item from its air date
 
 **Time Estimations** (`estimations.py`)
 - Functions to estimate completion time for different media types
@@ -109,31 +110,37 @@ The application uses a hierarchical document model stored in MongoDB via Beanie 
 **Settings** (`settings.py`)
 - Environment variables with `SET_` prefix
 - MongoDB connection: `SET_MONGO_URL`, `SET_MONGO_DB`
-- API credentials: `SET_TRAKT_CLIENT_ID`, `SET_TRAKT_CLIENT_SECRET`, `SET_HLTB_USER`, `SET_GOODREADS_USER`
+- API credentials: `SET_TMDB_TOKEN`, `SET_HLTB_USER`, `SET_GOODREADS_USER`, `SET_STEAM_API_KEY`, `SET_STEAM_USER_ID`
 - Uses pydantic-settings for configuration management
+- Note `settings.py` sets no `env_file`, so a `.env` is *not* read — values come from the shell (`.envrc` via direnv)
 
-**Secrets** (`secrets.json`)
-- Stores Trakt OAuth tokens (access_token, refresh_token)
-- Managed via `shelfspace/apis/secrets.py`
-- Not committed to git
+`SET_TMDB_TOKEN` is a TMDB read access token (bearer), free for personal use from
+https://www.themoviedb.org/settings/api. Every integration now authenticates from
+the environment, so there is no longer a `secrets.json` or a module managing it.
 
 ### Important Implementation Notes
 
 1. **Shelf References**: The codebase is transitioning from string-based shelf names to ObjectId references. New code uses `shelf_id` (ObjectId), but legacy code may still use `shelf` (string). The models support both during migration.
 
-2. **Trakt API**: Uses OAuth2 with token refresh. The `TraktAPI` class automatically refreshes tokens when needed and saves them back via `save_trakt_secrets()`.
+2. **TMDB API**: Replaced Trakt in August 2026, after Trakt stopped recognising the app's client ID and gated new apps behind VIP. TMDB was chosen over Simkl because it reports a runtime *per episode* — Simkl only has it at show level, which would flatten every episode estimate to a show-wide average.
+
+   Movies and shows are added from the GUI (`save_from_tmdb` in `gui_main.py` → `library.import_movie` / `import_series`). Picking a show imports **every** season, one Entry per season, with a SubEntry per episode. Episodes are placed by air date, except when Icebox is chosen, which parks the whole show there.
+
+   `refresh-media` keeps them current: newly scheduled episodes, whole new seasons for shows already tracked, slipped air dates, runtimes unknown at import, and rating drift. It then re-shelves every unwatched episode by air date, so a delayed episode follows itself onto the right sprint. **Finished subentries are never touched** — they record what was actually watched, not a prediction. A fully watched season of an ended show is skipped entirely.
 
 3. **Web Scraping**: The HLTB API uses Playwright for scraping. The `browser.py` module provides shared browser context management.
 
    Goodreads does not: it reads `review/list_rss/<user>?shelf=to-read`, which needs no login and no browser but requires the shelf to be public. The feed reports a publication *year* only, so book `release_date` is stored as 1 January of that year. Book media type comes from the user's own Goodreads shelves — `want-to-read-comics` maps to `Book (comics)` and `want-to-read-tech` to `Book (educational)` (see `COMICS_SHELF` / `EDUCATIONAL_SHELF` in `goodreads.py`).
 
-4. **Deduplication**: Import commands check for existing entries by API-specific IDs (e.g., `trakt_id`, `hltb_id`, `goodreads_id`) stored in the `metadata` field.
+4. **Deduplication**: Import commands check for existing entries by API-specific IDs (e.g., `tmdb_id`, `hltb_id`, `goodreads_id`) stored in the `metadata` field. TMDB entries carry `tmdb_type` (`"movie"` or `"season"`); a season's `tmdb_id` is `"<show_id>_s<n>"` and it also stores `tmdb_show_id` and `tmdb_season`.
 
    `process-books` goes further and refreshes entries it has already imported (`_refresh_book_entry`), because Goodreads fills in page counts and firm release dates for unreleased books late and the community rating drifts. It refreshes type, rating, release year, page count and estimate. Two rules keep it from destroying better data: it stores the page count it last saw as `metadata["goodreads_pages"]` and only recomputes an estimate that still matches what that page count implies (so a hand-tuned estimate survives), and it only touches `release_date` when the *year* differs (so an exact date captured by the old scraper is not downgraded to 1 January).
 
 5. **Time Format**: All time estimates are stored in minutes (int). Use `format_minutes()` from `utils.py` for human-readable display.
 
-6. **Legacy Code**: `main.py` and `*_old.py` files contain legacy code for Notion integration. The new architecture uses MongoDB directly.
+6. **Watched Status**: Set by hand via the "Mark as watched" (eye) button on movie cards and episode rows — there is no watch-history sync any more. `SubEntry.mark_watched()` holds the transition; the handler only notifies and refreshes.
+
+7. **Legacy Code**: `main.py` and `*_old.py` files contain legacy code for Notion integration. The new architecture uses MongoDB directly.
 
 ## Testing and Development
 
@@ -142,3 +149,4 @@ The application uses a hierarchical document model stored in MongoDB via Beanie 
 - Ruff for linting and formatting
 - Playwright requires installation: `playwright install`
 - MongoDB must be running before using the application
+- `uv run pytest` — tests live in `tests/`, config in `pytest.ini`. They need MongoDB up (Beanie will not build a Document without an initialised collection) but write nothing to it.

@@ -5,8 +5,11 @@ from urllib.parse import urlencode
 from nicegui import app, ui
 from nicegui.events import ValueChangeEventArguments
 
+from shelfspace.apis.tmdb import TMDBAPI
 from shelfspace.app_ctx import AppCtx
+from shelfspace.library import import_movie, import_series
 from shelfspace.models import Entry, Shelf, SubEntry, MediaType
+from shelfspace.shelving import ICEBOX, ShelfPlacement
 from shelfspace.utils import format_minutes
 
 
@@ -1110,6 +1113,45 @@ def create_subentry_row(entry: Entry, subentry: SubEntry, shelves_ui: dict) -> N
                 ).props("dense outlined").classes("min-w-[90px] text-xs")
 
 
+async def save_from_tmdb(result: dict, shelf: Shelf) -> None:
+    """Import a picked TMDB search result and report what landed.
+
+    Movies go straight onto the chosen shelf. A show's episodes are placed by
+    air date instead, so a part-aired season spreads across the right shelves --
+    unless Icebox was chosen, which parks the whole show there.
+    """
+    api = TMDBAPI()
+
+    try:
+        if result["media_type"] == MediaType.MOVIE:
+            entry = await import_movie(api, result["tmdb_id"], shelf.id)
+            if entry is None:
+                ui.notify(
+                    f"'{result['title']}' is already in the library", type="warning"
+                )
+                return
+            ui.notify(f"Added '{entry.name}' to {shelf.name}", type="positive")
+            return
+
+        placement = ShelfPlacement(await Shelf.get_shelves_dict())
+        created = await import_series(
+            api, result["tmdb_id"], placement, parked=shelf.name == ICEBOX
+        )
+    except Exception as error:
+        ui.notify(f"TMDB import failed: {error}", type="negative")
+        return
+
+    if not created:
+        ui.notify(f"'{result['title']}' is already in the library", type="warning")
+        return
+
+    episodes = sum(len(entry.subentries) for entry in created)
+    ui.notify(
+        f"Added {len(created)} season(s) of '{result['title']}' ({episodes} episodes)",
+        type="positive",
+    )
+
+
 async def add_entry_dialog(shelves_ui: dict) -> None:
     """Show dialog to add a new entry."""
     # Fetch existing entries for autocomplete
@@ -1123,8 +1165,80 @@ async def add_entry_dialog(shelves_ui: dict) -> None:
     # Track whether we're adding to existing entry or creating new
     selected_entry: Entry | None = None
 
-    with ui.dialog() as dialog, ui.card().classes("p-4"):
+    # A picked TMDB result; when set, Save imports it instead of creating a
+    # bare entry from the form fields.
+    selected_tmdb: dict | None = None
+
+    with ui.dialog() as dialog, ui.card().classes("p-4 w-[32rem]"):
         ui.label("Add New Entry").classes("text-xl font-bold mb-4")
+
+        # TMDB lookup - fills in runtime, air dates and rating, and for a show
+        # creates an entry per season with a subentry per episode.
+        search_input = (
+            ui.input("Search TMDB for a movie or show")
+            .props("outlined dense clearable debounce=400")
+            .classes("w-full")
+        )
+        results_container = ui.column().classes("w-full gap-0")
+
+        def show_selection(result: dict) -> None:
+            """Replace the result list with a confirmation of what was picked."""
+            results_container.clear()
+            # Rebuilding inside the container keeps NiceGUI able to resolve the
+            # client after the clicked button is deleted.
+            with results_container:
+                ui.label(
+                    f"✓ {get_emoji_for_type(result['media_type'].value)} "
+                    f"{result['title']}"
+                    f"{f' ({result["year"]})' if result['year'] else ''}"
+                ).classes("text-sm text-green-700 font-medium")
+
+        def make_pick_handler(result: dict):
+            def on_pick() -> None:
+                nonlocal selected_tmdb
+                selected_tmdb = result
+                type_select.set_value(result["media_type"].value)
+                type_select.disable()
+                name_select.set_value(f"new:{result['title']}")
+                mode_label.set_text(f"Will import from TMDB: {result['title']}")
+                mode_label.classes(
+                    remove="text-gray-500", add="text-green-700 font-medium"
+                )
+                show_selection(result)
+
+            return on_pick
+
+        async def on_search(e) -> None:
+            nonlocal selected_tmdb
+            selected_tmdb = None
+            query = (e.value or "").strip()
+
+            results_container.clear()
+            if len(query) < 2:
+                return
+
+            try:
+                results = await TMDBAPI().search(query)
+            except Exception as error:
+                with results_container:
+                    ui.label(f"TMDB search failed: {error}").classes(
+                        "text-xs text-red-500"
+                    )
+                return
+
+            with results_container:
+                if not results:
+                    ui.label("No matches").classes("text-xs text-gray-500")
+                    return
+                for result in results:
+                    year = f" ({result['year']})" if result["year"] else ""
+                    ui.button(
+                        f"{get_emoji_for_type(result['media_type'].value)} "
+                        f"{result['title']}{year}",
+                        on_click=make_pick_handler(result),
+                    ).props("flat dense no-caps align=left").classes("w-full text-sm")
+
+        search_input.on_value_change(on_search)
 
         # Form inputs - use combo-box for name with autocomplete
         # key_generator creates keys for newly typed values (prefixed to avoid collision)
@@ -1156,6 +1270,11 @@ async def add_entry_dialog(shelves_ui: dict) -> None:
         )
 
         notes_input = ui.textarea("Notes").props("outlined dense").classes("w-full")
+
+        ui.label(
+            "TMDB shows are added a season at a time, with episodes placed by "
+            f"air date. Pick {ICEBOX} to park the whole show there instead."
+        ).classes("text-xs text-gray-500")
 
         with ui.row().classes("w-full gap-2"):
             estimated_hours = (
@@ -1217,6 +1336,12 @@ async def add_entry_dialog(shelves_ui: dict) -> None:
                 shelf_obj = _shelves_by_name.get(shelf_select.value)
                 if not shelf_obj:
                     ui.notify("Invalid shelf selected", type="negative")
+                    return
+
+                if selected_tmdb:
+                    await save_from_tmdb(selected_tmdb, shelf_obj)
+                    dialog.close()
+                    await refresh_all_shelves(shelves_ui)
                     return
 
                 new_subentry = SubEntry(

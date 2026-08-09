@@ -14,24 +14,17 @@ run: ## Run the application
 	. .venv/bin/activate
 	SET_DEBUG=1 python -m shelfspace.gui_main
 
-process-apis: ## Sync playtime and process Trakt data
+process-apis: ## Sync playtime and refresh media metadata
 	. .venv/bin/activate
 	python shelf.py sync-steam-playtime
-	python shelf.py process-movies
-	python shelf.py process-shows
-	python shelf.py process-upcoming
-	python shelf.py process-watched
-	python shelf.py update-trakt-lists
+	python shelf.py process-books
+	python shelf.py refresh-media
 	python shelf.py export-data
 
 process-all: ## Sync all the things
 	. .venv/bin/activate
 	python shelf.py sync-steam-playtime
-	python shelf.py process-movies
-	python shelf.py process-shows
-	python shelf.py process-upcoming
-	python shelf.py process-watched
-	python shelf.py update-trakt-lists
+	python shelf.py refresh-media
 	python shelf.py process-books
 	python shelf.py process-games
 	python shelf.py export-data

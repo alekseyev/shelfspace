@@ -14,12 +14,9 @@ compose:
 env:
   SET_MONGO_URL: "mongodb://root:secret@localhost:4001"
   SET_MONGO_DB: "shelfspace"
-  SET_TRAKT_CLIENT_ID:
+  SET_TMDB_TOKEN:
     from: secret
-    name: SET_TRAKT_CLIENT_ID
-  SET_TRAKT_CLIENT_SECRET:
-    from: secret
-    name: SET_TRAKT_CLIENT_SECRET
+    name: SET_TMDB_TOKEN
   SET_HLTB_USER:
     from: secret
     name: SET_HLTB_USER

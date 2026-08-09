@@ -19,3 +19,9 @@ dependencies = [
     "ruff>=0.14.4",
     "typer>=0.20.0",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]

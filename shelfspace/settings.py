@@ -11,8 +11,8 @@ class Settings(BaseSettings):
 
     AUTH_SECRET: str = "secret"
 
-    TRAKT_CLIENT_ID: str = ""
-    TRAKT_CLIENT_SECRET: str = ""
+    # Read access token (bearer) from https://www.themoviedb.org/settings/api
+    TMDB_TOKEN: str = ""
 
     HLTB_USER: str = ""
     GOODREADS_USER: str = ""

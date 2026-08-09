@@ -34,16 +34,5 @@ def estimate_book(media_type: MediaType, pages: int | None) -> int | None:
     return estimate_book_from_pages(pages)
 
 
-def estimate_from_hltb(seconds: int) -> int:
-    return estimation_from_minutes(seconds * 1.1 // 60)
-
-
 def round_up_game_estimate(minutes: int) -> int:
     return estimation_from_minutes(int(minutes * 1.1))
-
-
-def estimate_episode(val: int) -> int:
-    val = int(val)
-    val += 5
-    val += 6 - (val % 6)
-    return val

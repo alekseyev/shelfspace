@@ -1,5 +1,4 @@
 import asyncio
-from contextlib import asynccontextmanager
 from beanie import init_beanie
 from pymongo import AsyncMongoClient
 
@@ -37,22 +36,3 @@ class AppCtx:
         if cls._initialized:
             return
         await cls._init_event.wait()
-
-
-@asynccontextmanager
-async def get_app_ctx(app=None):
-    app_ctx = None
-    if app:
-        app_ctx = getattr(app.state, "app_ctx", None)
-
-    if not app_ctx:
-        app_ctx = AppCtx()
-        await app_ctx.start()
-
-        if app:
-            app.state.app_ctx = app_ctx
-
-    try:
-        yield app_ctx
-    finally:
-        await app_ctx.shutdown()

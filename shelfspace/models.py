@@ -1,7 +1,6 @@
 from datetime import date, datetime
 import enum
 from beanie import Document
-from typing import Optional
 from bson import ObjectId
 from pydantic import BaseModel, Field
 
@@ -53,25 +52,6 @@ def get_emoji_for_type(media_type):
         "Talk/video": "🎥",
     }
     return emoji_map.get(media_type, "📌")
-
-
-class Status(str, enum.Enum):
-    FUTURE = "FUTURE"
-    CURRENT = "CURRENT"
-    DONE = "DONE"
-
-
-class LegacyEntry(BaseModel):
-    type: MediaType
-    name: str
-    notes: str = ""
-    estimated: Optional[float] = None
-    spent: Optional[float] = None
-    prog: str = ""
-    status: Optional[Status] = None
-    release_date: Optional[str] = ""
-    rating: Optional[int] = None
-    metadata: Optional[dict] = {}
 
 
 class Shelf(Document):

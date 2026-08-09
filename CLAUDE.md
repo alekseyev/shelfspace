@@ -35,14 +35,15 @@ docker-compose up -d
 python shelf.py refresh-media       # Refresh movies/shows from TMDB (new episodes, runtimes, air dates, ratings)
 python shelf.py process-games       # Import games from HowLongToBeat
 python shelf.py process-books       # Import books from Goodreads
+python shelf.py sync-steam-playtime # Credit Steam playtime to the current shelf
 
 # List all entries
 python shelf.py list-entries
-```
 
-### Legacy Commands (main.py)
-The `main.py` file contains older commands that export to Notion. These are being migrated to the new system but may still be useful:
-- `list-books`, `process-books-csv`, `list-games`, `process-games`, etc.
+# Back up / restore the database as JSON
+python shelf.py export-data
+python shelf.py import-data
+```
 
 ## Architecture
 
@@ -84,10 +85,10 @@ The application uses a hierarchical document model stored in MongoDB via Beanie 
 - Commands to list and view entries
 
 **API Integrations** (`shelfspace/apis/`)
-- `base.py` - BaseAPI class with common HTTP methods
 - `tmdb.py` - TMDBAPI for movies and TV shows, plus the Entry builders and refresh rules
 - `hltb.py` - HowLongAPI for game time estimates (uses Playwright for scraping)
 - `goodreads.py` - GoodreadsAPI for books (reads the public shelf RSS feed, no auth)
+- `steam.py` - SteamAPI for owned games and playtime
 
 **Media Library** (`library.py`, `shelving.py`)
 - `library.py` - import/refresh operations shared by the GUI add dialog and `refresh-media`
@@ -120,7 +121,7 @@ the environment, so there is no longer a `secrets.json` or a module managing it.
 
 ### Important Implementation Notes
 
-1. **Shelf References**: The codebase is transitioning from string-based shelf names to ObjectId references. New code uses `shelf_id` (ObjectId), but legacy code may still use `shelf` (string). The models support both during migration.
+1. **Shelf References**: Shelves are referenced by `shelf_id` (ObjectId). `SubEntry.shelf` (string name) is a leftover of the older scheme, kept only so old exports still round-trip through `import-data`; nothing reads it.
 
 2. **TMDB API**: Replaced Trakt in August 2026, after Trakt stopped recognising the app's client ID and gated new apps behind VIP. TMDB was chosen over Simkl because it reports a runtime *per episode* — Simkl only has it at show level, which would flatten every episode estimate to a show-wide average.
 
@@ -139,8 +140,6 @@ the environment, so there is no longer a `secrets.json` or a module managing it.
 5. **Time Format**: All time estimates are stored in minutes (int). Use `format_minutes()` from `utils.py` for human-readable display.
 
 6. **Watched Status**: Set by hand via the "Mark as watched" (eye) button on movie cards and episode rows — there is no watch-history sync any more. `SubEntry.mark_watched()` holds the transition; the handler only notifies and refreshes.
-
-7. **Legacy Code**: `main.py` and `*_old.py` files contain legacy code for Notion integration. The new architecture uses MongoDB directly.
 
 ## Testing and Development
 

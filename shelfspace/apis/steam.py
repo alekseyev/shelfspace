@@ -1,17 +1,15 @@
 """Steam API client for fetching game data and playtime."""
 
 import aiohttp
-from shelfspace.apis.base import BaseAPI
 from shelfspace.settings import settings
 
 
-class SteamAPI(BaseAPI):
+class SteamAPI:
     """Steam API client."""
 
     base_url = "http://api.steampowered.com"
 
     def __init__(self):
-        super().__init__()
         self.api_key = settings.STEAM_API_KEY
         self.steam_id = settings.STEAM_USER_ID
 
@@ -41,23 +39,3 @@ class SteamAPI(BaseAPI):
             async with session.get(url, params=params) as response:
                 data = await response.json()
                 return data.get("response", {}).get("games", [])
-
-    async def get_game_details(self, appid: int) -> dict | None:
-        """
-        Get detailed information about a game from Steam store.
-
-        Args:
-            appid: Steam app ID
-
-        Returns:
-            Dict with game details or None if not found
-        """
-        url = "https://store.steampowered.com/api/appdetails"
-        params = {"appids": appid}
-
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params) as response:
-                data = await response.json()
-                if str(appid) in data and data[str(appid)].get("success"):
-                    return data[str(appid)].get("data")
-                return None

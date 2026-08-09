@@ -9,8 +9,6 @@ class Settings(BaseSettings):
     MONGO_URL: str = "mongodb://root:secret@localhost:4001"
     MONGO_DB: str = "shelfspace"
 
-    AUTH_SECRET: str = "secret"
-
     # Read access token (bearer) from https://www.themoviedb.org/settings/api
     TMDB_TOKEN: str = ""
 

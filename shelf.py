@@ -9,22 +9,15 @@ from bson import ObjectId
 from beanie import init_beanie
 import typer
 
-from shelfspace.apis.goodreads import GoodreadsAPI
+from shelfspace.apis.goodreads import GoodreadsAPI, build_entry, refresh_entry
 from shelfspace.apis.hltb import HowlongAPI
 from shelfspace.apis.secrets import (
-    get_goodreads_storage_state,
     get_trakt_secrets,
-    save_goodreads_storage_state,
     save_trakt_secrets,
 )
 from shelfspace.apis.steam import SteamAPI
 from shelfspace.apis.trakt import TraktAPI
-from shelfspace.estimations import (
-    estimate_book_from_pages,
-    estimate_comic_book_from_pages,
-    estimate_ed_book_from_pages,
-    round_up_game_estimate,
-)
+from shelfspace.estimations import round_up_game_estimate
 from shelfspace.models import Entry, MediaType, Shelf, SubEntry
 from shelfspace.models import get_emoji_for_type
 from shelfspace.utils import format_minutes
@@ -192,32 +185,6 @@ def trakt_auth():
 
     typer.echo("Authorization expired. Please try again.")
     raise typer.Exit(1)
-
-
-@app.async_command()
-async def goodreads_login():
-    """Authenticate with Goodreads by logging in via browser and saving session cookies."""
-    import asyncio
-    from playwright.async_api import async_playwright
-
-    typer.echo("Opening Goodreads login page...")
-    typer.echo("Please log in and then press Enter here to save your session.")
-
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False)
-        context = await browser.new_context()
-        page = await context.new_page()
-        await page.goto("https://www.goodreads.com/user/sign_in")
-
-        await asyncio.get_event_loop().run_in_executor(
-            None, input, "\nPress Enter once you have logged in: "
-        )
-
-        state = await context.storage_state()
-        await browser.close()
-
-    save_goodreads_storage_state(state)
-    typer.echo("Goodreads session saved to secrets.json.")
 
 
 @app.async_command()
@@ -950,53 +917,47 @@ async def process_books():
     await init_db()
     icebox_shelf = await Shelf.find_one(Shelf.name == "Icebox")
 
-    storage_state = get_goodreads_storage_state()
-    if not storage_state:
-        typer.echo(
-            "Error: No Goodreads session found. Run 'python shelf.py goodreads-login' to authenticate."
-        )
-        raise typer.Exit(1)
-
     typer.echo("Fetching Goodreads data...")
-    api = GoodreadsAPI(storage_state=storage_state)
+    api = GoodreadsAPI()
     books = await api.get_to_read()
+    typer.echo(f"Found {len(books)} books on the to-read shelf.")
+
+    added_count = 0
+    updated_count = 0
+    missing_pages = []
+
     for book in books:
-        if await Entry.find_one(Entry.metadata["goodreads_id"] == book["goodreads_id"]):
+        if not book["page_count"]:
+            missing_pages.append(book["title"])
+
+        existing = await Entry.find_one(
+            Entry.metadata["goodreads_id"] == book["goodreads_id"]
+        )
+        if existing:
+            changes = refresh_entry(existing, book)
+            if changes:
+                typer.echo(
+                    f"Updating {get_emoji_for_type(existing.type)} {existing.name}: "
+                    + ", ".join(changes)
+                )
+                await existing.save()
+                updated_count += 1
             continue
 
-        book_data = await api.get_book_data(book["goodreads_id"])
-        media_type = MediaType.BOOK
-        pages = book_data.get("page_count", 0)
-        estimated = estimate_book_from_pages(pages) if pages else None
-        if book_data.get("is_comics"):
-            media_type = MediaType.BOOK_COM
-            estimated = estimate_comic_book_from_pages(pages) if pages else None
-        elif book_data.get("is_educational"):
-            media_type = MediaType.BOOK_ED
-            estimated = estimate_ed_book_from_pages(pages) if pages else None
-
-        shelf_id = icebox_shelf.id
-        shelf_name = "Icebox"
-
-        entry = Entry(
-            type=media_type.value,
-            name=f"{book_data['author']} - {book['title']}",
-            subentries=[
-                SubEntry(
-                    shelf_id=shelf_id,
-                    estimated=estimated,
-                    release_date=book_data.get("publication_date"),
-                )
-            ],
-            release_date=book_data.get("publication_date"),
-            metadata={"goodreads_id": book["goodreads_id"]},
-            links=[f"https://www.goodreads.com/book/show/{book['goodreads_id']}"],
-            rating=int(book["rating"] * 20) if book["rating"] else None,
-        )
-        typer.echo(
-            f"Adding {get_emoji_for_type(entry.type)} {entry.name} to {shelf_name}"
-        )
+        entry = build_entry(book, icebox_shelf.id)
+        typer.echo(f"Adding {get_emoji_for_type(entry.type)} {entry.name} to Icebox")
         await entry.save()
+        added_count += 1
+
+    typer.echo(f"\nAdded: {added_count} | Updated: {updated_count}")
+
+    if missing_pages:
+        typer.echo(
+            f"\nStill no page count in the feed for {len(missing_pages)} book(s), "
+            "so they carry no estimate yet:"
+        )
+        for title in missing_pages:
+            typer.echo(f"  - {title}")
 
     # Delete books that are no longer on Goodreads to-read list
     # Only delete if: has goodreads_id, in shelf without end_date, not finished

@@ -907,6 +907,7 @@ name = "shelfspace"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "aiohttp" },
     { name = "async-typer" },
     { name = "beanie" },
     { name = "fake-useragent" },
@@ -923,6 +924,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiohttp", specifier = ">=3.13.2" },
     { name = "async-typer", specifier = ">=0.1.10" },
     { name = "beanie", specifier = ">=2.0.1" },
     { name = "fake-useragent", specifier = ">=2.2.0" },

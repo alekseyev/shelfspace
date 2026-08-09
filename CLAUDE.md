@@ -89,7 +89,7 @@ The application uses a hierarchical document model stored in MongoDB via Beanie 
 - `base.py` - BaseAPI class with common HTTP methods
 - `trakt.py` - TraktAPI for movies and TV shows (requires OAuth tokens)
 - `hltb.py` - HowLongAPI for game time estimates (uses Playwright for scraping)
-- `goodreads.py` - GoodreadsAPI for books (uses Playwright for scraping)
+- `goodreads.py` - GoodreadsAPI for books (reads the public shelf RSS feed, no auth)
 - `secrets.py` - Manages API credentials from secrets.json
 
 **Time Estimations** (`estimations.py`)
@@ -123,9 +123,13 @@ The application uses a hierarchical document model stored in MongoDB via Beanie 
 
 2. **Trakt API**: Uses OAuth2 with token refresh. The `TraktAPI` class automatically refreshes tokens when needed and saves them back via `save_trakt_secrets()`.
 
-3. **Web Scraping**: Goodreads and HLTB APIs use Playwright for scraping. The `browser.py` module provides shared browser context management.
+3. **Web Scraping**: The HLTB API uses Playwright for scraping. The `browser.py` module provides shared browser context management.
+
+   Goodreads does not: it reads `review/list_rss/<user>?shelf=to-read`, which needs no login and no browser but requires the shelf to be public. The feed reports a publication *year* only, so book `release_date` is stored as 1 January of that year. Book media type comes from the user's own Goodreads shelves — `want-to-read-comics` maps to `Book (comics)` and `want-to-read-tech` to `Book (educational)` (see `COMICS_SHELF` / `EDUCATIONAL_SHELF` in `goodreads.py`).
 
 4. **Deduplication**: Import commands check for existing entries by API-specific IDs (e.g., `trakt_id`, `hltb_id`, `goodreads_id`) stored in the `metadata` field.
+
+   `process-books` goes further and refreshes entries it has already imported (`_refresh_book_entry`), because Goodreads fills in page counts and firm release dates for unreleased books late and the community rating drifts. It refreshes type, rating, release year, page count and estimate. Two rules keep it from destroying better data: it stores the page count it last saw as `metadata["goodreads_pages"]` and only recomputes an estimate that still matches what that page count implies (so a hand-tuned estimate survives), and it only touches `release_date` when the *year* differs (so an exact date captured by the old scraper is not downgraded to 1 January).
 
 5. **Time Format**: All time estimates are stored in minutes (int). Use `format_minutes()` from `utils.py` for human-readable display.
 

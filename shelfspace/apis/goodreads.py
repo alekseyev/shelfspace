@@ -21,8 +21,20 @@ from shelfspace.models import Entry, MediaType, SubEntry
 from shelfspace.settings import settings
 from shelfspace.utils import format_minutes
 
+TO_READ_SHELF = "to-read"
 COMICS_SHELF = "want-to-read-comics"
 EDUCATIONAL_SHELF = "want-to-read-tech"
+
+# Each item carries a `user_shelves` list, but it is only as fresh as the feed
+# it arrives in, and Goodreads caches every shelf's feed separately: the to-read
+# feed can keep describing a book as plain to-read for days after it was also
+# filed under a genre shelf. Genre membership is therefore read from the genre
+# feeds themselves, where it is a fact about the response rather than a field
+# inside it. Comics is checked first so a book on both shelves reads as comics.
+GENRE_SHELVES = {
+    COMICS_SHELF: MediaType.BOOK_COM,
+    EDUCATIONAL_SHELF: MediaType.BOOK_ED,
+}
 
 # The feed serves 100 items per page; stop early rather than loop forever if
 # Goodreads ever starts repeating pages instead of returning an empty one.
@@ -48,14 +60,6 @@ def _float_or_none(text: str | None) -> float | None:
         return float(text)
     except ValueError:
         return None
-
-
-def _media_type(shelves: list[str]) -> MediaType:
-    if COMICS_SHELF in shelves:
-        return MediaType.BOOK_COM
-    if EDUCATIONAL_SHELF in shelves:
-        return MediaType.BOOK_ED
-    return MediaType.BOOK
 
 
 def _rating(item: ET.Element) -> int | None:
@@ -90,7 +94,8 @@ def _parse_item(item: ET.Element) -> dict | None:
         # The feed only reports a year, so the day and month are placeholders.
         "publication_date": date(published_year, 1, 1) if published_year else None,
         "shelves": shelves,
-        "media_type": _media_type(shelves),
+        # Filled in by get_to_read, from the genre feeds.
+        "media_type": MediaType.BOOK,
     }
 
 
@@ -159,7 +164,9 @@ def refresh_entry(entry: Entry, book: dict) -> list[str]:
         changes.append(f"pages {known_pages or '?'} -> {pages}")
 
     unfinished = [s for s in entry.subentries if not s.is_finished]
-    new_estimate = estimate_book(new_type, pages)
+    # The feed sometimes drops a page count it has already reported; the last one
+    # it gave still beats leaving a re-shelved book on the wrong reading rate.
+    new_estimate = estimate_book(new_type, pages or known_pages)
     # Splitting one book across several subentries is a manual decision, so
     # there is no safe way to redistribute a new estimate across them.
     if new_estimate and len(unfinished) == 1:
@@ -178,10 +185,10 @@ class GoodreadsAPI:
     user = settings.GOODREADS_USER
 
     async def _fetch_page(
-        self, session: aiohttp.ClientSession, page: int
+        self, session: aiohttp.ClientSession, shelf: str, page: int
     ) -> list[ET.Element]:
         url = f"{self.base_url}/review/list_rss/{self.user}"
-        async with session.get(url, params={"shelf": "to-read", "page": page}) as resp:
+        async with session.get(url, params={"shelf": shelf, "page": page}) as resp:
             resp.raise_for_status()
             body = await resp.text()
 
@@ -190,32 +197,54 @@ class GoodreadsAPI:
             return []
         return channel.findall("item")
 
+    async def _fetch_shelf(
+        self, session: aiohttp.ClientSession, shelf: str
+    ) -> dict[int, dict]:
+        """Every book on one shelf, in feed order, keyed by Goodreads id."""
+        # Pages can overlap when the shelf changes mid-fetch, so key by id.
+        books: dict[int, dict] = {}
+
+        for page in range(1, MAX_PAGES + 1):
+            items = await self._fetch_page(session, shelf, page)
+            if not items:
+                break
+
+            new_on_page = 0
+            for item in items:
+                book = _parse_item(item)
+                if not book:
+                    continue
+                if book["goodreads_id"] not in books:
+                    new_on_page += 1
+                books[book["goodreads_id"]] = book
+
+            if not new_on_page:
+                break
+
+        return books
+
     async def get_to_read(self) -> list[dict]:
         """Return every book on the to-read shelf, in feed order."""
         if not self.user:
             raise ValueError("SET_GOODREADS_USER is not configured")
 
-        # Pages can overlap when the shelf changes mid-fetch, so key by id.
-        books: dict[int, dict] = {}
-
         async with aiohttp.ClientSession(
             headers={"User-Agent": _USER_AGENT}
         ) as session:
-            for page in range(1, MAX_PAGES + 1):
-                items = await self._fetch_page(session, page)
-                if not items:
-                    break
+            books = await self._fetch_shelf(session, TO_READ_SHELF)
 
-                new_on_page = 0
-                for item in items:
-                    book = _parse_item(item)
-                    if not book:
-                        continue
-                    if book["goodreads_id"] not in books:
-                        new_on_page += 1
-                    books[book["goodreads_id"]] = book
+            genres: dict[int, MediaType] = {}
+            for shelf, media_type in GENRE_SHELVES.items():
+                for goodreads_id, book in (
+                    await self._fetch_shelf(session, shelf)
+                ).items():
+                    genres.setdefault(goodreads_id, media_type)
+                    # The genre feed can be the fresher of the two, so a book
+                    # the to-read feed has not caught up on is taken from here.
+                    if goodreads_id not in books and TO_READ_SHELF in book["shelves"]:
+                        books[goodreads_id] = book
 
-                if not new_on_page:
-                    break
+        for goodreads_id, book in books.items():
+            book["media_type"] = genres.get(goodreads_id, MediaType.BOOK)
 
         return list(books.values())

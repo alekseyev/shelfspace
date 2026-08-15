@@ -168,7 +168,7 @@ async def refresh_media(movies: bool = True, series: bool = True):
 
     if series:
         typer.echo("Refreshing shows from TMDB...")
-        placement = ShelfPlacement(await Shelf.get_shelves_dict())
+        placement = ShelfPlacement(await Shelf.get_all_dict())
         for entry, changes in await refresh_series(api, placement):
             typer.echo(f"✓ {entry.name}: {', '.join(changes)}")
 

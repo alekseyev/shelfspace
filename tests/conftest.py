@@ -22,18 +22,24 @@ async def _beanie():
     await client.drop_database(TEST_DB)
 
 
-def make_shelf(name: str, start: date | None = None, end: date | None = None) -> Shelf:
-    shelf = Shelf(name=name, start_date=start, end_date=end)
+def make_shelf(
+    name: str,
+    start: date | None = None,
+    end: date | None = None,
+    is_finished: bool = False,
+) -> Shelf:
+    shelf = Shelf(name=name, start_date=start, end_date=end, is_finished=is_finished)
     shelf.id = ObjectId()
     return shelf
 
 
 @pytest.fixture
 def shelves() -> dict[ObjectId, Shelf]:
-    """Icebox and Backlog plus two consecutive week-long sprints."""
+    """Icebox and Backlog, a closed sprint, then two open week-long ones."""
     built = [
         make_shelf("Icebox"),
         make_shelf("Backlog"),
+        make_shelf("past", date(2026, 7, 27), date(2026, 8, 2), is_finished=True),
         make_shelf("week1", date(2026, 8, 3), date(2026, 8, 9)),
         make_shelf("week2", date(2026, 8, 10), date(2026, 8, 16)),
     ]

@@ -89,6 +89,21 @@ def should_add_season(
     return can_grow or bool(season["air_date"])
 
 
+def parked_at(
+    placement: ShelfPlacement, show_entries: list[Entry], season: int
+) -> bool:
+    """Whether new episodes of ``season`` should be iced rather than scheduled.
+
+    Icing a season means "not until I have caught up with the ones before it",
+    so it carries forward to later seasons but never back to earlier ones. A
+    show with S2 in the Icebox and S1 waiting in the Backlog is the ordinary
+    case, and S1 must stay where it is.
+    """
+    return placement.is_parked(
+        [e for e in show_entries if e.metadata["tmdb_season"] <= season]
+    )
+
+
 async def refresh_movies(api: TMDBAPI) -> list[tuple[Entry, list[str]]]:
     """Update unwatched movies from TMDB. Returns what changed, per entry."""
     entries = await Entry.find(Entry.metadata["tmdb_type"] == "movie").to_list()
@@ -137,17 +152,17 @@ async def refresh_series(
         if not has_unwatched and not can_grow:
             continue
 
-        parked = placement.is_parked(show_entries)
-
-        def shelf_id_for(air_date, parked=parked):
-            return placement.resolve(air_date, parked)
-
         tracked = {entry.metadata["tmdb_season"]: entry for entry in show_entries}
         earliest_tracked = min(tracked, default=None)
 
         for season in show["seasons"]:
             number = season["number"]
             entry = tracked.get(number)
+
+            def shelf_id_for(
+                air_date, parked=parked_at(placement, show_entries, number)
+            ):
+                return placement.resolve(air_date, parked)
 
             if entry is None:
                 if not should_add_season(season, earliest_tracked, can_grow):
@@ -181,7 +196,7 @@ async def refresh_series(
                 await entry.save()
                 results.append((entry, changes))
 
-        moved = placement.reassign(show_entries, parked)
+        moved = placement.reassign(show_entries)
         if moved:
             for entry in show_entries:
                 await entry.save()

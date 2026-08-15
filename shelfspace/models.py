@@ -70,6 +70,17 @@ class Shelf(Document):
         cls._shelves_dict = {shelf.id: shelf for shelf in shelves}
         return cls._shelves_dict
 
+    @classmethod
+    async def get_all_dict(cls) -> dict[ObjectId, "Shelf"]:
+        """Every shelf, finished ones included.
+
+        Placement needs the closed sprints to tell an episode that aired during
+        one from an episode that was never scheduled at all. The display cache
+        in ``get_shelves_dict`` deliberately holds only the open shelves, so it
+        is left untouched here.
+        """
+        return {shelf.id: shelf for shelf in await cls.find().to_list()}
+
     def generate_name(self) -> str:
         if self.start_date and self.end_date:
             return f"{self.start_date.strftime('%d %B')} - {self.end_date.strftime('%d %B %Y')}"

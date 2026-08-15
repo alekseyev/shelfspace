@@ -8,8 +8,8 @@ from shelfspace.apis.tmdb import (
     refresh_movie_entry,
     refresh_season_entry,
 )
-from shelfspace.library import should_add_season
-from shelfspace.models import MediaType
+from shelfspace.library import parked_at, should_add_season
+from shelfspace.models import Entry, MediaType
 from shelfspace.shelving import ShelfPlacement
 
 
@@ -129,7 +129,7 @@ def test_refresh_leaves_watched_episodes_alone(shelves):
     assert watched.release_date == date(2026, 8, 5)
 
     # Re-shelving must not drag watched episodes off the shelf they were seen on.
-    placement.reassign([entry], parked=False)
+    placement.reassign([entry])
     assert watched.shelf_id == original_shelf
 
 
@@ -145,7 +145,7 @@ def test_reassign_moves_unwatched_episode_to_the_shelf_its_air_date_landed_in(sh
     refresh_season_entry(
         entry, show, [episode(1, 50, date(2026, 8, 12))], placement.resolve
     )
-    moved = placement.reassign([entry], parked=False)
+    moved = placement.reassign([entry])
 
     assert moved == 1
     assert entry.subentries[0].shelf_id == by_name["week2"]
@@ -230,3 +230,126 @@ def test_refresh_ignores_an_unscheduled_season_of_a_finished_show():
     assert not should_add_season(
         {"number": 10, "air_date": None}, earliest_tracked=9, can_grow=False
     )
+
+
+def test_reassign_leaves_an_unwatched_episode_that_aired_weeks_ago(shelves):
+    """The Lucky case: a season kept together on the current sprint stays put."""
+    placement = ShelfPlacement(shelves)
+    by_name = {shelf.name: shelf.id for shelf in shelves.values()}
+    show = show_payload()
+    entry = build_season_entry(
+        show, 1, [episode(1, 50, date(2026, 7, 28))], placement.resolve
+    )
+    # Aired during a sprint that has since closed, so import parks it in Backlog.
+    assert entry.subentries[0].shelf_id == by_name["Backlog"]
+
+    # The episode is then pulled onto the current sprint by hand, unwatched.
+    entry.subentries[0].shelf_id = by_name["week1"]
+
+    assert placement.reassign([entry]) == 0
+    assert entry.subentries[0].shelf_id == by_name["week1"]
+
+
+def test_reassign_never_pulls_an_episode_back_to_its_air_date_shelf(shelves):
+    """Deliberately held back to be binged once the season has finished."""
+    placement = ShelfPlacement(shelves)
+    by_name = {shelf.name: shelf.id for shelf in shelves.values()}
+    show = show_payload()
+    entry = build_season_entry(
+        show, 1, [episode(1, 50, date(2026, 8, 5))], placement.resolve
+    )
+    assert entry.subentries[0].shelf_id == by_name["week1"]
+
+    entry.subentries[0].shelf_id = by_name["week2"]
+
+    assert placement.reassign([entry]) == 0
+    assert entry.subentries[0].shelf_id == by_name["week2"]
+
+
+def test_reassign_still_follows_an_air_date_that_slipped_later(shelves):
+    placement = ShelfPlacement(shelves)
+    by_name = {shelf.name: shelf.id for shelf in shelves.values()}
+    show = show_payload()
+    entry = build_season_entry(
+        show, 1, [episode(1, 50, date(2026, 8, 5))], placement.resolve
+    )
+    refresh_season_entry(
+        entry, show, [episode(1, 50, date(2026, 8, 12))], placement.resolve
+    )
+
+    assert placement.reassign([entry]) == 1
+    assert entry.subentries[0].shelf_id == by_name["week2"]
+
+
+def test_resolve_never_schedules_onto_a_finished_shelf(shelves):
+    placement = ShelfPlacement(shelves)
+    by_name = {shelf.name: shelf.id for shelf in shelves.values()}
+    # Squarely inside the closed sprint's range, which is closed to new work.
+    assert placement.resolve(date(2026, 7, 29)) == by_name["Backlog"]
+
+
+def test_reassign_never_takes_an_episode_out_of_the_icebox(shelves):
+    """The Icebox is a hold placed by hand; an air date must not undo it."""
+    placement = ShelfPlacement(shelves)
+    by_name = {shelf.name: shelf.id for shelf in shelves.values()}
+    show = show_payload()
+    entry = build_season_entry(
+        show, 1, [episode(1, 50, date(2026, 8, 12))], placement.resolve
+    )
+    assert entry.subentries[0].shelf_id == by_name["week2"]
+
+    entry.subentries[0].shelf_id = by_name["Icebox"]
+
+    assert placement.reassign([entry]) == 0
+    assert entry.subentries[0].shelf_id == by_name["Icebox"]
+
+
+def test_reassign_never_sweeps_a_show_into_the_icebox(shelves):
+    """The Gentlemen case: S2 iced to wait its turn, S1 stays in the Backlog."""
+    placement = ShelfPlacement(shelves)
+    by_name = {shelf.name: shelf.id for shelf in shelves.values()}
+    show = show_payload()
+    season1 = build_season_entry(show, 1, [episode(1, 50, None)], placement.resolve)
+    season2 = build_season_entry(
+        show, 2, [episode(1, 50, date(2026, 8, 5))], placement.resolve
+    )
+    season2.subentries[0].shelf_id = by_name["Icebox"]
+
+    assert placement.reassign([season1, season2]) == 0
+    assert season1.subentries[0].shelf_id == by_name["Backlog"]
+    assert season2.subentries[0].shelf_id == by_name["Icebox"]
+
+
+def test_parking_carries_forward_to_later_seasons_but_not_back(shelves):
+    placement = ShelfPlacement(shelves)
+    by_name = {shelf.name: shelf.id for shelf in shelves.values()}
+
+    def season(number: int, shelf: str) -> Entry:
+        entry = build_season_entry(
+            show_payload(), number, [episode(1, 50, None)], placement.resolve
+        )
+        entry.metadata["tmdb_season"] = number
+        entry.subentries[0].shelf_id = by_name[shelf]
+        return entry
+
+    entries = [season(1, "Backlog"), season(2, "Icebox")]
+
+    # A new episode of S1 is scheduled normally; one of S3 waits behind S2.
+    assert not parked_at(placement, entries, 1)
+    assert parked_at(placement, entries, 2)
+    assert parked_at(placement, entries, 3)
+
+
+def test_reassign_schedules_an_episode_waiting_in_the_backlog(shelves):
+    placement = ShelfPlacement(shelves)
+    by_name = {shelf.name: shelf.id for shelf in shelves.values()}
+    show = show_payload()
+    entry = build_season_entry(show, 1, [episode(1, 50, None)], placement.resolve)
+    assert entry.subentries[0].shelf_id == by_name["Backlog"]
+
+    refresh_season_entry(
+        entry, show, [episode(1, 50, date(2026, 8, 5))], placement.resolve
+    )
+
+    assert placement.reassign([entry]) == 1
+    assert entry.subentries[0].shelf_id == by_name["week1"]

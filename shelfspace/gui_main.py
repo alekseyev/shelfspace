@@ -1133,7 +1133,7 @@ async def save_from_tmdb(result: dict, shelf: Shelf) -> None:
             ui.notify(f"Added '{entry.name}' to {shelf.name}", type="positive")
             return
 
-        placement = ShelfPlacement(await Shelf.get_shelves_dict())
+        placement = ShelfPlacement(await Shelf.get_all_dict())
         created = await import_series(
             api, result["tmdb_id"], placement, parked=shelf.name == ICEBOX
         )

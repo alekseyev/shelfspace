@@ -93,7 +93,7 @@ The application uses a hierarchical document model stored in MongoDB via Beanie 
 
 **Media Library** (`library.py`, `shelving.py`)
 - `library.py` - import/refresh operations shared by the GUI add dialog and `refresh-media`
-- `shelving.py` - `ShelfPlacement`, which decides the shelf for an unwatched item from its air date
+- `shelving.py` - `ShelfPlacement`, which decides the shelf for an unwatched item from its air date. Placement is **forward-only**: see the re-shelving rules under TMDB below
 
 **Time Estimations** (`estimations.py`)
 - Functions to estimate completion time for different media types
@@ -131,6 +131,12 @@ the environment, so there is no longer a `secrets.json` or a module managing it.
    `refresh-media` keeps them current: newly scheduled episodes, whole new seasons for shows already tracked, slipped air dates, runtimes unknown at import, and rating drift. It then re-shelves every unwatched episode by air date, so a delayed episode follows itself onto the right sprint. **Finished subentries are never touched** — they record what was actually watched, not a prediction. A fully watched season of an ended show is skipped entirely.
 
    New seasons are only added *forward*: `should_add_season` in `library.py` skips any season numbered below the earliest one already tracked for that show. Picking a show up at its current season is normal, and without this a refresh drags the whole back catalogue into the Backlog.
+
+   **Re-shelving is forward-only too** (`ShelfPlacement._is_forward`). An air date is a prediction of when something *can* be watched, not an instruction about when it must be, so an episode only ever moves to a *later* shelf. Two cases this protects: a season kept together on the current sprint even though its early episodes aired weeks ago, and episodes deliberately pushed out to be binged once the season finishes. Backlog and Icebox sit outside the calendar rather than later in it, so an item on a dated shelf is never demoted to one.
+
+   **The Icebox is a hold, not a bin.** `reassign` never takes an episode out of it and never puts one in. The three shelves mean different things: a dated shelf is "planned for then", Backlog is "soon, unscheduled", Icebox is "not until I say so". Only `is_parked` writes to the Icebox, and only for episodes that have no shelf yet — a season invented by a refresh, which must not be scheduled ahead of seasons still waiting. Parking carries **forward** across seasons and never back (`parked_at` in `library.py`): a show with S2 iced and S1 in the Backlog is the ordinary "don't watch S2 before S1" case, and S1 must stay put. Sweeping the whole show into the Icebox because one season was iced was a real bug.
+
+   `ShelfPlacement` takes **all** shelves (`Shelf.get_all_dict()`), finished ones included, because it has to tell "aired during a sprint that has since closed" from "never scheduled". It still never *schedules* onto a finished shelf: `self.dated` filters them out, so a past air date resolves to Backlog. `Shelf.get_shelves_dict()` remains the open-shelves display cache and must not be used for placement — that was the Lucky bug, where episodes that aired inside a closed sprint fell through to Backlog and were dragged off the current shelf.
 
    `migrate-to-tmdb` is the one-off that rebound entries imported before the TMDB switch, which still carried `trakt_id` metadata and were therefore invisible to `refresh-media` (it selects on `tmdb_type`). Trakt ids cannot be translated — TMDB's `/find` does not know them and Trakt's API is gone — so `migration.py` rematches by title and year, and refuses anything ambiguous rather than guessing, because a wrong binding is silent and permanent. Movies are separated by TMDB popularity when a title and year tie (shorts and duplicates sit orders of magnitude below the real film; two real films do not). Shows are matched on season *air dates*, a far sharper fingerprint than a title — this is what distinguishes the 2013 thriller *Utopia* from the soap of the same name. Five entries remain on Trakt ids and need a decision by hand; season 0 (specials) has no TMDB counterpart at all.
 

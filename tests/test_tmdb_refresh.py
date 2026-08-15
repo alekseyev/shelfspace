@@ -8,6 +8,7 @@ from shelfspace.apis.tmdb import (
     refresh_movie_entry,
     refresh_season_entry,
 )
+from shelfspace.library import should_add_season
 from shelfspace.models import MediaType
 from shelfspace.shelving import ShelfPlacement
 
@@ -202,3 +203,30 @@ def test_movie_refresh_leaves_a_watched_movie_alone(shelves):
 
     assert entry.subentries[0].estimated == 120
     assert entry.subentries[0].spent == 120
+
+
+def test_refresh_skips_seasons_older_than_anything_tracked():
+    # Picked the show up at S9; S1-S8 are history that was left out on purpose.
+    assert not should_add_season(
+        {"number": 3, "air_date": date(2019, 11, 10)}, earliest_tracked=9, can_grow=True
+    )
+
+
+def test_refresh_adds_a_season_after_the_ones_tracked():
+    assert should_add_season(
+        {"number": 10, "air_date": date(2026, 9, 1)}, earliest_tracked=9, can_grow=True
+    )
+
+
+def test_refresh_adds_every_season_when_none_is_tracked_yet():
+    assert should_add_season(
+        {"number": 1, "air_date": date(2019, 11, 10)},
+        earliest_tracked=None,
+        can_grow=False,
+    )
+
+
+def test_refresh_ignores_an_unscheduled_season_of_a_finished_show():
+    assert not should_add_season(
+        {"number": 10, "air_date": None}, earliest_tracked=9, can_grow=False
+    )

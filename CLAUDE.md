@@ -36,6 +36,7 @@ python shelf.py refresh-media       # Refresh movies/shows from TMDB (new episod
 python shelf.py process-games       # Import games from HowLongToBeat
 python shelf.py process-books       # Import books from Goodreads
 python shelf.py sync-steam-playtime # Credit Steam playtime to the current shelf
+python shelf.py migrate-to-tmdb     # Rebind pre-TMDB entries onto TMDB ids (dry run without --apply)
 
 # List all entries
 python shelf.py list-entries
@@ -128,6 +129,10 @@ the environment, so there is no longer a `secrets.json` or a module managing it.
    Movies and shows are added from the GUI (`save_from_tmdb` in `gui_main.py` → `library.import_movie` / `import_series`). Picking a show imports **every** season, one Entry per season, with a SubEntry per episode. Episodes are placed by air date, except when Icebox is chosen, which parks the whole show there.
 
    `refresh-media` keeps them current: newly scheduled episodes, whole new seasons for shows already tracked, slipped air dates, runtimes unknown at import, and rating drift. It then re-shelves every unwatched episode by air date, so a delayed episode follows itself onto the right sprint. **Finished subentries are never touched** — they record what was actually watched, not a prediction. A fully watched season of an ended show is skipped entirely.
+
+   New seasons are only added *forward*: `should_add_season` in `library.py` skips any season numbered below the earliest one already tracked for that show. Picking a show up at its current season is normal, and without this a refresh drags the whole back catalogue into the Backlog.
+
+   `migrate-to-tmdb` is the one-off that rebound entries imported before the TMDB switch, which still carried `trakt_id` metadata and were therefore invisible to `refresh-media` (it selects on `tmdb_type`). Trakt ids cannot be translated — TMDB's `/find` does not know them and Trakt's API is gone — so `migration.py` rematches by title and year, and refuses anything ambiguous rather than guessing, because a wrong binding is silent and permanent. Movies are separated by TMDB popularity when a title and year tie (shorts and duplicates sit orders of magnitude below the real film; two real films do not). Shows are matched on season *air dates*, a far sharper fingerprint than a title — this is what distinguishes the 2013 thriller *Utopia* from the soap of the same name. Five entries remain on Trakt ids and need a decision by hand; season 0 (specials) has no TMDB counterpart at all.
 
 3. **Web Scraping**: The HLTB API uses Playwright for scraping. The `browser.py` module provides shared browser context management.
 

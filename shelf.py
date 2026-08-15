@@ -14,6 +14,7 @@ from shelfspace.apis.steam import SteamAPI
 from shelfspace.apis.tmdb import TMDBAPI
 from shelfspace.estimations import round_up_game_estimate
 from shelfspace.library import refresh_movies, refresh_series
+from shelfspace.migration import apply_proposal, collect_proposals
 from shelfspace.models import Entry, MediaType, Shelf, SubEntry
 from shelfspace.models import get_emoji_for_type
 from shelfspace.shelving import ShelfPlacement
@@ -172,6 +173,76 @@ async def refresh_media(movies: bool = True, series: bool = True):
             typer.echo(f"✓ {entry.name}: {', '.join(changes)}")
 
     typer.echo("Refresh complete")
+
+
+@app.async_command()
+async def migrate_to_tmdb(apply: bool = False):
+    """Rebind Trakt-era entries onto TMDB ids so refresh-media can see them.
+
+    Entries imported before the August 2026 TMDB switch still carry trakt_id
+    metadata, which refresh-media does not match, so they have not been
+    refreshed since. This rematches them by title and year.
+
+    Reports what it would do and changes nothing unless --apply is passed, and
+    even then only writes matches it is confident about; ambiguous ones are
+    listed for you to sort out by hand. Subentries are never touched.
+    """
+    await init_db()
+    api = TMDBAPI()
+
+    typer.echo("Matching Trakt-era entries against TMDB...")
+    proposals = await collect_proposals(api)
+    if not proposals:
+        typer.echo("Nothing left to migrate.")
+        return
+
+    confident = [p for p in proposals if p.confident]
+    unresolved = [p for p in proposals if not p.confident]
+
+    for proposal in sorted(confident, key=lambda p: p.label.lower()):
+        seasons = (
+            f" [{len(proposal.entries)} seasons]" if proposal.kind == "show" else ""
+        )
+        typer.echo(
+            f"  ✓ {proposal.label}{seasons} -> TMDB {proposal.match['tmdb_id']} "
+            f"{proposal.match['title']} ({proposal.match['year'] or '?'})"
+        )
+        # Episode-count gaps are worth seeing even on a match we trust.
+        for note in proposal.notes[1:]:
+            typer.echo(f"      note: {note}")
+
+    for proposal in sorted(unresolved, key=lambda p: p.label.lower()):
+        guess = ""
+        if proposal.match:
+            guess = (
+                f" - closest: TMDB {proposal.match['tmdb_id']} "
+                f"{proposal.match['title']} ({proposal.match['year'] or '?'})"
+            )
+        typer.echo(f"  ? {proposal.label}{guess}")
+        for note in proposal.notes:
+            typer.echo(f"      {note}")
+
+    typer.echo(
+        f"\n{len(confident)} confident, {len(unresolved)} need a decision "
+        f"({sum(len(p.entries) for p in confident)} entries would be rewritten)"
+    )
+
+    if not apply:
+        typer.echo("Dry run - re-run with --apply to write these.")
+        return
+
+    if not confident:
+        typer.echo("Nothing confident enough to write.")
+        return
+
+    if not typer.confirm(f"Rebind {len(confident)} titles onto TMDB ids?"):
+        typer.echo("Aborted.")
+        raise typer.Exit(0)
+
+    for proposal in confident:
+        await apply_proposal(proposal)
+
+    typer.echo(f"Rebound {len(confident)} titles. Run refresh-media to fill them in.")
 
 
 @app.async_command()

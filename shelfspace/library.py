@@ -74,6 +74,21 @@ async def import_series(
     return created
 
 
+def should_add_season(
+    season: dict, earliest_tracked: int | None, can_grow: bool
+) -> bool:
+    """Whether a season TMDB lists but nothing here tracks should be created.
+
+    Seasons below the earliest one tracked are back catalogue left out on
+    purpose -- picking a show up at its current season is normal, and a refresh
+    has no business dragging its history in behind it. Above that line, an
+    unscheduled season only counts once the show is one that can still grow.
+    """
+    if earliest_tracked is not None and season["number"] < earliest_tracked:
+        return False
+    return can_grow or bool(season["air_date"])
+
+
 async def refresh_movies(api: TMDBAPI) -> list[tuple[Entry, list[str]]]:
     """Update unwatched movies from TMDB. Returns what changed, per entry."""
     entries = await Entry.find(Entry.metadata["tmdb_type"] == "movie").to_list()
@@ -128,14 +143,14 @@ async def refresh_series(
             return placement.resolve(air_date, parked)
 
         tracked = {entry.metadata["tmdb_season"]: entry for entry in show_entries}
+        earliest_tracked = min(tracked, default=None)
 
         for season in show["seasons"]:
             number = season["number"]
             entry = tracked.get(number)
 
             if entry is None:
-                # A season announced since this show was imported.
-                if not can_grow and not season["air_date"]:
+                if not should_add_season(season, earliest_tracked, can_grow):
                     continue
                 episodes = await api.get_season_episodes(show_id, number)
                 if not episodes:

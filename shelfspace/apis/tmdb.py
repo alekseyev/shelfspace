@@ -295,6 +295,41 @@ class TMDBAPI:
 
         return results
 
+    async def _search_titles(
+        self, path: str, title_key: str, date_key: str, query: str
+    ) -> list[dict]:
+        query = query.strip()
+        if not query:
+            return []
+
+        async with self._session() as session:
+            payload = await self._get(
+                session, path, {"query": query, "include_adult": "false"}
+            )
+
+        results = []
+        for item in payload.get("results", []):
+            release = _parse_date(item.get(date_key))
+            results.append(
+                {
+                    "tmdb_id": item["id"],
+                    "title": item.get(title_key) or "",
+                    "year": release.year if release else None,
+                    "popularity": item.get("popularity") or 0.0,
+                }
+            )
+        return results
+
+    async def search_movies(self, query: str) -> list[dict]:
+        """Every movie matching a title, for offline scoring against a year."""
+        return await self._search_titles(
+            "/search/movie", "title", "release_date", query
+        )
+
+    async def search_shows(self, query: str) -> list[dict]:
+        """Every show matching a title, for offline scoring against a year."""
+        return await self._search_titles("/search/tv", "name", "first_air_date", query)
+
     async def get_movie(self, tmdb_id: int) -> dict:
         async with self._session() as session:
             payload = await self._get(session, f"/movie/{tmdb_id}")

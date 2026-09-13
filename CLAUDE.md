@@ -128,6 +128,8 @@ the environment, so there is no longer a `secrets.json` or a module managing it.
 
    Movies and shows are added from the GUI (`save_from_tmdb` in `gui_main.py` → `library.import_movie` / `import_series`). Picking a show imports **every** season, one Entry per season, with a SubEntry per episode. Episodes are placed by air date, except when Icebox is chosen, which parks the whole show there.
 
+   Picking a TMDB result puts the add dialog into an import mode: name, type, estimate and notes all come from TMDB (or, for notes, are not carried at all), so those fields are filled in and disabled, and Save stops demanding a name. Editing the search box drops the pick and gives the form back. The shelf picker is the exception — it is the one thing the user still decides, so it offers every unfinished shelf including the Icebox no matter which view mode is showing (`get_addable_shelves`), and defaults to the sprint covering today (`default_add_shelf`), falling back to Backlog between sprints.
+
    `refresh-media` keeps them current: newly scheduled episodes, whole new seasons for shows already tracked, slipped air dates, runtimes unknown at import, and rating drift. It then re-shelves every unwatched episode by air date, so a delayed episode follows itself onto the right sprint. **Finished subentries are never touched** — they record what was actually watched, not a prediction. A fully watched season of an ended show is skipped entirely.
 
    New seasons are only added *forward*: `should_add_season` in `library.py` skips any season numbered below the earliest one already tracked for that show. Picking a show up at its current season is normal, and without this a refresh drags the whole back catalogue into the Backlog.

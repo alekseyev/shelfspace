@@ -9,7 +9,7 @@ from shelfspace.apis.tmdb import TMDBAPI
 from shelfspace.app_ctx import AppCtx
 from shelfspace.library import import_movie, import_series
 from shelfspace.models import Entry, Shelf, SubEntry, MediaType
-from shelfspace.shelving import ICEBOX, ShelfPlacement
+from shelfspace.shelving import BACKLOG, ICEBOX, ShelfPlacement
 from shelfspace.utils import format_minutes
 
 
@@ -26,6 +26,10 @@ _shelves_ui_ref: dict = {}
 # Global shelf objects cache
 _shelves_by_name: dict[str, Shelf] = {}
 _shelves_by_id: dict = {}
+
+# Option key standing in for a picked TMDB result in the add dialog's name
+# select, so the title shows in a field whose real options are entry ids.
+TMDB_NAME_KEY = "tmdb:picked"
 
 
 # Per-tab UI state, isolated per browser tab via app.storage.tab.
@@ -338,6 +342,31 @@ def get_all_shelves() -> list[str]:
     # Sort by weight (lower weight comes first)
     shelves.sort(key=lambda s: s.weight)
     return [shelf.name for shelf in shelves]
+
+
+async def get_addable_shelves() -> list[Shelf]:
+    """Every shelf something can be added to, whatever the view mode is showing.
+
+    The add dialog is not a view of the board: parking a new item in the Icebox
+    or scheduling it on a future sprint has to work while looking at any view,
+    so this reads the shelves itself instead of the view-filtered cache.
+    """
+    shelves = await Shelf.find(Shelf.is_finished == False).to_list()  # noqa: E712
+    return sorted(shelves, key=lambda s: s.weight)
+
+
+def default_add_shelf(shelves: list[Shelf]) -> Shelf | None:
+    """The shelf a new item lands on unless told otherwise: the current sprint.
+
+    Between sprints there is no current shelf, and the Backlog is the honest
+    answer then -- something unscheduled, rather than something pushed onto
+    whichever sprint happens to come next.
+    """
+    current = next((s for s in shelves if is_current_shelf(s)), None)
+    if current:
+        return current
+    backlog = next((s for s in shelves if s.name == BACKLOG), None)
+    return backlog or (shelves[0] if shelves else None)
 
 
 def get_next_shelf(current_shelf: Shelf) -> Shelf | None:
@@ -1169,6 +1198,12 @@ async def add_entry_dialog(shelves_ui: dict) -> None:
     # bare entry from the form fields.
     selected_tmdb: dict | None = None
 
+    # Anything unfinished can be added to, including the Icebox, regardless of
+    # which shelves the current view mode happens to show.
+    addable_shelves = await get_addable_shelves()
+    shelves_by_name = {shelf.name: shelf for shelf in addable_shelves}
+    default_shelf = default_add_shelf(addable_shelves)
+
     with ui.dialog() as dialog, ui.card().classes("p-4 w-[32rem]"):
         ui.label("Add New Entry").classes("text-xl font-bold mb-4")
 
@@ -1193,24 +1228,63 @@ async def add_entry_dialog(shelves_ui: dict) -> None:
                     f"{f' ({result["year"]})' if result['year'] else ''}"
                 ).classes("text-sm text-green-700 font-medium")
 
+        def enter_tmdb_mode(result: dict) -> None:
+            """Hand the form over to TMDB, which knows all of it better.
+
+            Name, type, runtime and air dates all come from the import, so the
+            fields that would duplicate them are filled in and locked rather
+            than left asking for input that is about to be overwritten.
+            """
+            nonlocal selected_tmdb, selected_entry
+            selected_tmdb = result
+            selected_entry = None
+
+            # The title alone, as it will be stored: the year belongs to
+            # release_date, and the search list above already carries it for
+            # telling candidates apart.
+            title = (
+                f"{get_emoji_for_type(result['media_type'].value)} {result['title']}"
+            )
+            name_select.set_options(
+                {**entry_options, TMDB_NAME_KEY: title}, value=TMDB_NAME_KEY
+            )
+            name_select.disable()
+
+            type_select.set_value(result["media_type"].value)
+            type_select.disable()
+
+            estimated_hours.set_value(None)
+            estimated_hours.disable()
+            notes_input.set_value("")
+            notes_input.disable()
+
+            mode_label.set_text(f"Will import from TMDB: {result['title']}")
+            mode_label.classes(remove="text-gray-500", add="text-green-700 font-medium")
+
+        def leave_tmdb_mode() -> None:
+            """Give the form back once the picked result is dropped."""
+            nonlocal selected_tmdb
+            if selected_tmdb is None:
+                return
+            selected_tmdb = None
+
+            name_select.enable()
+            name_select.set_options(entry_options, value=None)
+            type_select.enable()
+            estimated_hours.enable()
+            notes_input.enable()
+            mode_label.set_text("Type a new name or select existing entry")
+            mode_label.classes(remove="text-green-700 font-medium", add="text-gray-500")
+
         def make_pick_handler(result: dict):
             def on_pick() -> None:
-                nonlocal selected_tmdb
-                selected_tmdb = result
-                type_select.set_value(result["media_type"].value)
-                type_select.disable()
-                name_select.set_value(f"new:{result['title']}")
-                mode_label.set_text(f"Will import from TMDB: {result['title']}")
-                mode_label.classes(
-                    remove="text-gray-500", add="text-green-700 font-medium"
-                )
+                enter_tmdb_mode(result)
                 show_selection(result)
 
             return on_pick
 
         async def on_search(e) -> None:
-            nonlocal selected_tmdb
-            selected_tmdb = None
+            leave_tmdb_mode()
             query = (e.value or "").strip()
 
             results_container.clear()
@@ -1282,13 +1356,11 @@ async def add_entry_dialog(shelves_ui: dict) -> None:
                 .props("outlined dense")
                 .classes("flex-1")
             )
-            shelf_options = get_all_shelves()
-            shelf_value = shelf_options[-1] if shelf_options else None
             shelf_select = (
                 ui.select(
-                    options=shelf_options,
+                    options=[shelf.name for shelf in addable_shelves],
                     label="Shelf",
-                    value=shelf_value,
+                    value=default_shelf.name if default_shelf else None,
                 )
                 .props("outlined dense")
                 .classes("flex-1")
@@ -1296,6 +1368,9 @@ async def add_entry_dialog(shelves_ui: dict) -> None:
 
         def on_name_change(e):
             nonlocal selected_entry
+            # In TMDB mode the name is the picked title, not a choice to react to.
+            if selected_tmdb:
+                return
             value = e.value
             if value in entries_by_id:
                 # Existing entry selected
@@ -1328,12 +1403,12 @@ async def add_entry_dialog(shelves_ui: dict) -> None:
             ui.button("Cancel", on_click=dialog.close).props("flat")
 
             async def save_entry():
-                if not name_select.value:
+                if not selected_tmdb and not name_select.value:
                     ui.notify("Name is required", type="negative")
                     return
 
                 # Get shelf object
-                shelf_obj = _shelves_by_name.get(shelf_select.value)
+                shelf_obj = shelves_by_name.get(shelf_select.value)
                 if not shelf_obj:
                     ui.notify("Invalid shelf selected", type="negative")
                     return
